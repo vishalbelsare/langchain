@@ -1,3 +1,18 @@
+"""Analyze git diffs to determine which directories need to be tested.
+
+Intelligently determines which LangChain packages and directories need to be tested,
+linted, or built based on the changes. Handles dependency relationships between
+packages, maps file changes to appropriate CI job configurations, and outputs JSON
+configurations for GitHub Actions.
+
+- Maps changed files to affected package directories (libs/core, libs/partners/*, etc.)
+- Builds dependency graph to include dependent packages when core components change
+- Generates test matrix configurations with appropriate Python versions
+- Handles special cases for Pydantic version testing and performance benchmarks
+
+Used as part of the check_diffs workflow.
+"""
+
 import glob
 import json
 import os
@@ -15,28 +30,26 @@ LANGCHAIN_DIRS = [
     "libs/text-splitters",
     "libs/langchain",
     "libs/langchain_v1",
+    "libs/model-profiles",
 ]
 
-# when set to True, we are ignoring core dependents
+# Packages with VCR cassette-backed integration tests.
+# These get a playback-only CI check to catch stale cassettes.
+VCR_PACKAGES = {
+    "libs/partners/openai",
+}
+
+# When set to True, we are ignoring core dependents
 # in order to be able to get CI to pass for each individual
 # package that depends on core
 # e.g. if you touch core, we don't then add textsplitters/etc to CI
 IGNORE_CORE_DEPENDENTS = False
 
-# ignored partners are removed from dependents
-# but still run if directly edited
+# Ignored partners are removed from dependents but still run if directly edited
 IGNORED_PARTNERS = [
     # remove huggingface from dependents because of CI instability
     # specifically in huggingface jobs
-    # https://github.com/langchain-ai/langchain/issues/25558
     "huggingface",
-    # prompty exhibiting issues with numpy for Python 3.13
-    # https://github.com/langchain-ai/langchain/actions/runs/12651104685/job/35251034969?pr=29065
-    "prompty",
-]
-
-PY_312_MAX_PACKAGES = [
-    "libs/partners/chroma",  # https://github.com/chroma-core/chroma/issues/4382
 ]
 
 
@@ -44,14 +57,14 @@ def all_package_dirs() -> Set[str]:
     return {
         "/".join(path.split("/")[:-1]).lstrip("./")
         for path in glob.glob("./libs/**/pyproject.toml", recursive=True)
-        if "libs/cli" not in path and "libs/standard-tests" not in path
+        if "libs/standard-tests" not in path
     }
 
 
 def dependents_graph() -> dict:
-    """
-    Construct a mapping of package -> dependents, such that we can
-    run tests on all dependents of a package when a change is made.
+    """Construct a mapping of package -> dependents
+
+    Done such that we can run tests on all dependents of a package when a change is made.
     """
     dependents = defaultdict(set)
 
@@ -119,33 +132,31 @@ def _get_configs_for_single_dir(job: str, dir_: str) -> List[Dict[str, str]]:
         return _get_pydantic_test_configs(dir_)
 
     if job == "codspeed":
-        py_versions = ["3.12"]  # 3.13 is not yet supported
-    elif dir_ == "libs/core":
-        py_versions = ["3.9", "3.10", "3.11", "3.12", "3.13"]
-    # custom logic for specific directories
-    elif dir_ == "libs/partners/milvus":
-        # milvus doesn't allow 3.12 because they declare deps in funny way
-        py_versions = ["3.9", "3.11"]
-
-    elif dir_ in PY_312_MAX_PACKAGES:
-        py_versions = ["3.9", "3.12"]
-
-    elif dir_ == "libs/langchain" and job == "extended-tests":
-        py_versions = ["3.9", "3.13"]
-    elif dir_ == "libs/langchain_v1":
-        py_versions = ["3.10", "3.13"]
-
-    elif dir_ == ".":
-        # unable to install with 3.13 because tokenizers doesn't support 3.13 yet
-        py_versions = ["3.9", "3.12"]
+        # CPU simulation (<1% variance, Valgrind-based) is the default.
+        # Partners with heavy SDK inits use walltime instead to keep CI fast.
+        CODSPEED_WALLTIME_DIRS = {
+            "libs/core",
+            "libs/partners/fireworks",  # ~328s under simulation
+            "libs/partners/openai",  # 6 benchmarks, ~6 min under simulation
+        }
+        mode = "walltime" if dir_ in CODSPEED_WALLTIME_DIRS else "simulation"
+        return [
+            {
+                "working-directory": dir_,
+                "python-version": "3.13",
+                "codspeed-mode": mode,
+            }
+        ]
+    if dir_ == "libs/core":
+        py_versions = ["3.10", "3.11", "3.12", "3.13", "3.14"]
     else:
-        py_versions = ["3.9", "3.13"]
+        py_versions = ["3.10", "3.14"]
 
     return [{"working-directory": dir_, "python-version": py_v} for py_v in py_versions]
 
 
 def _get_pydantic_test_configs(
-    dir_: str, *, python_version: str = "3.11"
+    dir_: str, *, python_version: str = "3.12"
 ) -> List[Dict[str, str]]:
     with open("./libs/core/uv.lock", "rb") as f:
         core_uv_lock_data = tomllib.load(f)
@@ -215,6 +226,14 @@ def _get_configs_for_multi_dirs(
         dirs = list(dirs_to_run["extended-test"])
     elif job == "codspeed":
         dirs = list(dirs_to_run["codspeed"])
+    elif job == "vcr-tests":
+        # Only run VCR tests for packages that have cassettes and are affected
+        all_affected = set(
+            add_dependents(
+                dirs_to_run["test"] | dirs_to_run["extended-test"], dependents
+            )
+        )
+        dirs = [d for d in VCR_PACKAGES if d in all_affected]
     else:
         raise ValueError(f"Unknown job: {job}")
 
@@ -223,8 +242,42 @@ def _get_configs_for_multi_dirs(
     ]
 
 
+def _get_changed_files(args: list[str]) -> list[str]:
+    """Parse changed files from command-line arguments.
+
+    Args:
+        args: Either a legacy list of filename arguments or a single JSON array
+            produced by `Ana06/get-changed-files` with `format: json`.
+
+    Returns:
+        List of changed files.
+
+    Raises:
+        ValueError: If a single argument looks like JSON but is not a string array.
+    """
+    if len(args) != 1:
+        return args
+
+    value = args[0].strip()
+    if not value.startswith("[") or not value.endswith("]"):
+        return args
+
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as e:
+        msg = "Expected changed files JSON to be a list of strings."
+        raise ValueError(msg) from e
+
+    if not isinstance(parsed, list) or not all(
+        isinstance(file, str) for file in parsed
+    ):
+        msg = "Expected changed files JSON to be a list of strings."
+        raise ValueError(msg)
+    return parsed
+
+
 if __name__ == "__main__":
-    files = sys.argv[1:]
+    files = _get_changed_files(sys.argv[1:])
 
     dirs_to_run: Dict[str, set] = {
         "lint": set(),
@@ -250,12 +303,21 @@ if __name__ == "__main__":
                 ".github/scripts/check_diff.py",
             )
         ):
-            # add all LANGCHAIN_DIRS for infra changes
+            # Infrastructure changes (workflows, actions, CI scripts) trigger tests on
+            # all core packages as a safety measure. This ensures that changes to CI/CD
+            # infrastructure don't inadvertently break package testing, even if the change
+            # appears unrelated (e.g., documentation build workflows). This is intentionally
+            # conservative to catch unexpected side effects from workflow modifications.
+            #
+            # Example: A PR modifying .github/workflows/api_doc_build.yml will trigger
+            # lint/test jobs for libs/core, libs/text-splitters, libs/langchain, and
+            # libs/langchain_v1, even though the workflow may only affect documentation.
             dirs_to_run["extended-test"].update(LANGCHAIN_DIRS)
-            dirs_to_run["lint"].add(".")
 
         if file.startswith("libs/core"):
-            dirs_to_run["codspeed"].add(f"libs/core")
+            dirs_to_run["codspeed"].add("libs/core")
+        if file.startswith("libs/langchain_v1"):
+            dirs_to_run["codspeed"].add("libs/langchain_v1")
         if any(file.startswith(dir_) for dir_ in LANGCHAIN_DIRS):
             # add that dir and all dirs after in LANGCHAIN_DIRS
             # for extended testing
@@ -274,17 +336,11 @@ if __name__ == "__main__":
             # Note: won't run on external repo partners
             dirs_to_run["lint"].add("libs/standard-tests")
             dirs_to_run["test"].add("libs/standard-tests")
-            dirs_to_run["lint"].add("libs/cli")
-            dirs_to_run["test"].add("libs/cli")
             dirs_to_run["test"].add("libs/partners/mistralai")
             dirs_to_run["test"].add("libs/partners/openai")
             dirs_to_run["test"].add("libs/partners/anthropic")
             dirs_to_run["test"].add("libs/partners/fireworks")
             dirs_to_run["test"].add("libs/partners/groq")
-
-        elif file.startswith("libs/cli"):
-            dirs_to_run["lint"].add("libs/cli")
-            dirs_to_run["test"].add("libs/cli")
 
         elif file.startswith("libs/partners"):
             partner_dir = file.split("/")[2]
@@ -294,21 +350,30 @@ if __name__ == "__main__":
                 if not filename.startswith(".")
             ] != ["README.md"]:
                 dirs_to_run["test"].add(f"libs/partners/{partner_dir}")
-                dirs_to_run["codspeed"].add(f"libs/partners/{partner_dir}")
+                # Only add to codspeed if the partner has benchmarks and is not ignored
+                if (
+                    partner_dir not in IGNORED_PARTNERS
+                    and os.path.isdir(
+                        f"libs/partners/{partner_dir}/tests/benchmarks"
+                    )
+                ):
+                    dirs_to_run["codspeed"].add(f"libs/partners/{partner_dir}")
             # Skip if the directory was deleted or is just a tombstone readme
-        elif file == "libs/packages.yml":
-            continue
         elif file.startswith("libs/"):
+            # Check if this is a root-level file in libs/ (e.g., libs/README.md)
+            file_parts = file.split("/")
+            if len(file_parts) == 2:
+                # Root-level file in libs/, skip it (no tests needed)
+                continue
             raise ValueError(
                 f"Unknown lib: {file}. check_diff.py likely needs "
                 "an update for this new library!"
             )
-        elif file.startswith("docs/") or file in [
+        elif file in [
             "pyproject.toml",
             "uv.lock",
-        ]:  # docs or root uv files
+        ]:  # root uv files
             docs_edited = True
-            dirs_to_run["lint"].add(".")
 
     dependents = dependents_graph()
 
@@ -324,11 +389,9 @@ if __name__ == "__main__":
             "dependencies",
             "test-pydantic",
             "codspeed",
+            "vcr-tests",
         ]
     }
-    map_job_to_configs["test-doc-imports"] = (
-        [{"python-version": "3.12"}] if docs_edited else []
-    )
 
     for key, value in map_job_to_configs.items():
         json_output = json.dumps(value)

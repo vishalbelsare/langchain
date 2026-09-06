@@ -1,9 +1,6 @@
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from typing import (
     Any,
-    Callable,
-    Optional,
-    Union,
 )
 
 import pytest
@@ -18,7 +15,7 @@ from langchain_core.language_models import (
     LanguageModelInput,
 )
 from langchain_core.load import dumps
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatResult
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import (
@@ -31,10 +28,18 @@ from langchain_core.runnables import (
     RunnableWithFallbacks,
 )
 from langchain_core.tools import BaseTool
+from langchain_core.version import VERSION
+
+
+def _normalize_lc_version(value: str) -> str:
+    return value.replace(
+        f"'langchain-core': '{VERSION}'",
+        "'langchain-core': '<version>'",
+    )
 
 
 @pytest.fixture
-def llm() -> RunnableWithFallbacks:
+def llm() -> RunnableWithFallbacks[Any, Any]:
     error_llm = FakeListLLM(responses=["foo"], i=1)
     pass_llm = FakeListLLM(responses=["bar"])
 
@@ -42,7 +47,7 @@ def llm() -> RunnableWithFallbacks:
 
 
 @pytest.fixture
-def llm_multi() -> RunnableWithFallbacks:
+def llm_multi() -> RunnableWithFallbacks[Any, Any]:
     error_llm = FakeListLLM(responses=["foo"], i=1)
     error_llm_2 = FakeListLLM(responses=["baz"], i=1)
     pass_llm = FakeListLLM(responses=["bar"])
@@ -51,7 +56,7 @@ def llm_multi() -> RunnableWithFallbacks:
 
 
 @pytest.fixture
-def chain() -> Runnable:
+def chain() -> Runnable[Any, str]:
     error_llm = FakeListLLM(responses=["foo"], i=1)
     pass_llm = FakeListLLM(responses=["bar"])
 
@@ -61,18 +66,18 @@ def chain() -> Runnable:
     )
 
 
-def _raise_error(_: dict) -> str:
+def _raise_error(_: dict[str, Any]) -> str:
     raise ValueError
 
 
-def _dont_raise_error(inputs: dict) -> str:
+def _dont_raise_error(inputs: dict[str, Any]) -> str:
     if "exception" in inputs:
         return "bar"
     raise ValueError
 
 
 @pytest.fixture
-def chain_pass_exceptions() -> Runnable:
+def chain_pass_exceptions() -> Runnable[Any, str]:
     fallback = RunnableLambda(_dont_raise_error)
     return {"text": RunnablePassthrough()} | RunnableLambda(
         _raise_error
@@ -80,31 +85,31 @@ def chain_pass_exceptions() -> Runnable:
 
 
 @pytest.mark.parametrize(
-    "runnable",
+    "runnable_name",
     ["llm", "llm_multi", "chain", "chain_pass_exceptions"],
 )
 def test_fallbacks(
-    runnable: RunnableWithFallbacks, request: Any, snapshot: SnapshotAssertion
+    runnable_name: str, request: Any, snapshot: SnapshotAssertion
 ) -> None:
-    runnable = request.getfixturevalue(runnable)
+    runnable: Runnable[Any, Any] = request.getfixturevalue(runnable_name)
     assert runnable.invoke("hello") == "bar"
     assert runnable.batch(["hi", "hey", "bye"]) == ["bar"] * 3
     assert list(runnable.stream("hello")) == ["bar"]
-    assert dumps(runnable, pretty=True) == snapshot
+    assert _normalize_lc_version(dumps(runnable, pretty=True)) == snapshot
 
 
 @pytest.mark.parametrize(
-    "runnable",
+    "runnable_name",
     ["llm", "llm_multi", "chain", "chain_pass_exceptions"],
 )
-async def test_fallbacks_async(runnable: RunnableWithFallbacks, request: Any) -> None:
-    runnable = request.getfixturevalue(runnable)
+async def test_fallbacks_async(runnable_name: str, request: Any) -> None:
+    runnable: Runnable[Any, Any] = request.getfixturevalue(runnable_name)
     assert await runnable.ainvoke("hello") == "bar"
     assert await runnable.abatch(["hi", "hey", "bye"]) == ["bar"] * 3
     assert list(await runnable.ainvoke("hello")) == list("bar")
 
 
-def _runnable(inputs: dict) -> str:
+def _runnable(inputs: dict[str, Any]) -> str:
     if inputs["text"] == "foo":
         return "first"
     if "exception" not in inputs:
@@ -117,8 +122,8 @@ def _runnable(inputs: dict) -> str:
     return "third"
 
 
-def _assert_potential_error(actual: list, expected: list) -> None:
-    for x, y in zip(actual, expected):
+def _assert_potential_error(actual: list[Any], expected: list[Any]) -> None:
+    for x, y in zip(actual, expected, strict=False):
         if isinstance(x, Exception):
             assert isinstance(y, type(x))
         else:
@@ -260,20 +265,22 @@ async def test_abatch() -> None:
     _assert_potential_error(actual, expected)
 
 
-def _generate(_: Iterator) -> Iterator[str]:
+def _generate(_: Iterator[Any]) -> Iterator[str]:
     yield from "foo bar"
 
 
-def _generate_immediate_error(_: Iterator) -> Iterator[str]:
-    msg = "immmediate error"
+def _error(msg: str) -> None:
     raise ValueError(msg)
+
+
+def _generate_immediate_error(_: Iterator[Any]) -> Iterator[str]:
+    _error("immediate error")
     yield ""
 
 
-def _generate_delayed_error(_: Iterator) -> Iterator[str]:
+def _generate_delayed_error(_: Iterator[Any]) -> Iterator[str]:
     yield ""
-    msg = "delayed error"
-    raise ValueError(msg)
+    _error("delayed error")
 
 
 def test_fallbacks_stream() -> None:
@@ -289,21 +296,19 @@ def test_fallbacks_stream() -> None:
         list(runnable.stream({}))
 
 
-async def _agenerate(_: AsyncIterator) -> AsyncIterator[str]:
+async def _agenerate(_: AsyncIterator[Any]) -> AsyncIterator[str]:
     for c in "foo bar":
         yield c
 
 
-async def _agenerate_immediate_error(_: AsyncIterator) -> AsyncIterator[str]:
-    msg = "immmediate error"
-    raise ValueError(msg)
+async def _agenerate_immediate_error(_: AsyncIterator[Any]) -> AsyncIterator[str]:
+    _error("immediate error")
     yield ""
 
 
-async def _agenerate_delayed_error(_: AsyncIterator) -> AsyncIterator[str]:
+async def _agenerate_delayed_error(_: AsyncIterator[Any]) -> AsyncIterator[str]:
     yield ""
-    msg = "delayed error"
-    raise ValueError(msg)
+    _error("delayed error")
 
 
 async def test_fallbacks_astream() -> None:
@@ -328,8 +333,8 @@ class FakeStructuredOutputModel(BaseChatModel):
     def _generate(
         self,
         messages: list[BaseMessage],
-        stop: Optional[list[str]] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
         """Top Level call."""
@@ -338,15 +343,17 @@ class FakeStructuredOutputModel(BaseChatModel):
     @override
     def bind_tools(
         self,
-        tools: Sequence[Union[dict[str, Any], type[BaseModel], Callable, BaseTool]],
+        tools: Sequence[
+            dict[str, Any] | type[BaseModel] | Callable[..., Any] | BaseTool
+        ],
         **kwargs: Any,
-    ) -> Runnable[LanguageModelInput, BaseMessage]:
+    ) -> Runnable[LanguageModelInput, AIMessage]:
         return self.bind(tools=tools)
 
     @override
     def with_structured_output(
-        self, schema: Union[dict, type[BaseModel]], **kwargs: Any
-    ) -> Runnable[LanguageModelInput, Union[dict, BaseModel]]:
+        self, schema: dict[str, Any] | type[BaseModel], **kwargs: Any
+    ) -> Runnable[LanguageModelInput, dict[str, int] | BaseModel]:
         return RunnableLambda(lambda _: {"foo": self.foo})
 
     @property
@@ -361,8 +368,8 @@ class FakeModel(BaseChatModel):
     def _generate(
         self,
         messages: list[BaseMessage],
-        stop: Optional[list[str]] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
         """Top Level call."""
@@ -371,9 +378,11 @@ class FakeModel(BaseChatModel):
     @override
     def bind_tools(
         self,
-        tools: Sequence[Union[dict[str, Any], type[BaseModel], Callable, BaseTool]],
+        tools: Sequence[
+            dict[str, Any] | type[BaseModel] | Callable[..., Any] | BaseTool
+        ],
         **kwargs: Any,
-    ) -> Runnable[LanguageModelInput, BaseMessage]:
+    ) -> Runnable[LanguageModelInput, AIMessage]:
         return self.bind(tools=tools)
 
     @property

@@ -1,52 +1,57 @@
-# -----------------------------------------------------------------------------
-# PR Title Lint Workflow
+# PR title linting.
 #
-# Purpose:
-#   Enforces Conventional Commits format for pull request titles to maintain a
-#   clear, consistent, and machine-readable change history across our repository.
-#   This helps with automated changelog generation and semantic versioning.
+# FORMAT (Conventional Commits 1.0.0):
 #
-# Enforced Commit Message Format (Conventional Commits 1.0.0):
 #   <type>[optional scope]: <description>
 #   [optional body]
 #   [optional footer(s)]
 #
+# Examples:
+#     feat(core): add multi‐tenant support
+#     fix(langchain): resolve error
+#     docs: update API usage examples
+#     docs(openai): update API usage examples
+#
 # Allowed Types:
-#   • feat       — a new feature (MINOR bump)
-#   • fix        — a bug fix (PATCH bump)
-#   • docs       — documentation only changes
-#   • style      — formatting, missing semi-colons, etc.; no code change
-#   • refactor   — code change that neither fixes a bug nor adds a feature
-#   • perf       — code change that improves performance
-#   • test       — adding missing tests or correcting existing tests
-#   • build      — changes that affect the build system or external dependencies
-#   • ci         — continuous integration/configuration changes
-#   • chore      — other changes that don't modify src or test files
-#   • revert     — reverts a previous commit
-#   • release    — prepare a new release
+#   * feat       — a new feature (MINOR)
+#   * fix        — a bug fix (PATCH)
+#   * docs       — documentation only changes
+#   * style      — formatting, linting, etc.; no code change or typing refactors
+#   * refactor   — code change that neither fixes a bug nor adds a feature
+#   * perf       — code change that improves performance
+#   * test       — adding tests or correcting existing
+#   * build      — changes that affect the build system/external dependencies
+#   * ci         — continuous integration/configuration changes
+#   * chore      — other changes that don't modify source or test files
+#   * revert     — reverts a previous commit
+#   * release    — prepare a new release
+#   * hotfix     — urgent fix
 #
-# Allowed Scopes (optional):
-#   core, cli, langchain, standard-tests, docs, anthropic, chroma, deepseek,
-#   exa, fireworks, groq, huggingface, mistralai, nomic, ollama, openai,
-#   perplexity, prompty, qdrant, xai
+# Allowed Scope(s) (optional):
+#   core, langchain, langchain-classic, model-profiles,
+#   standard-tests, text-splitters, docs, anthropic, chroma, deepseek, exa,
+#   fireworks, groq, huggingface, mistralai, nomic, ollama, openai,
+#   perplexity, qdrant, xai, infra, deps, partners
 #
-# Rules & Tips for New Committers:
-#   1. Subject (type) must start with a lowercase letter and, if possible, be
-#      followed by a scope wrapped in parenthesis `(scope)`
-#   2. Breaking changes:
-#        – Append "!" after type/scope (e.g., feat!: drop Node 12 support)
-#        – Or include a footer "BREAKING CHANGE: <details>"
-#   3. Example PR titles:
-#        feat(core): add multi‐tenant support
-#        fix(cli): resolve flag parsing error
-#        docs: update API usage examples
-#        docs(openai): update API usage examples
+# Multiple scopes can be used by separating them with a comma. For example:
 #
-# Resources:
-#   • Conventional Commits spec: https://www.conventionalcommits.org/en/v1.0.0/
-# -----------------------------------------------------------------------------
+#   feat(core,langchain): add multi‐tenant support to core and langchain
+#
+# Note: PRs touching the langchain package should use the 'langchain' scope. It is not
+#   acceptable to omit the scope for changes to the langchain package, despite it being
+#   the main package & name of the repo.
+#
+# Rules:
+#   1. The 'Type' must start with a lowercase letter.
+#   2. Breaking changes: append "!" after type/scope (e.g., feat!: drop x support)
+#   3. When releasing (updating the pyproject.toml and uv.lock), the commit message
+#      should be: `release(scope): x.y.z` (e.g., `release(core): 1.2.0` with no
+#      body, footer, or preceeding/proceeding text).
+#
+# Enforces Conventional Commits format for pull request titles to maintain a clear and
+# machine-readable change history.
 
-name: '🏷️ PR Title Lint'
+name: "🏷️ PR Title Lint"
 
 permissions:
   pull-requests: read
@@ -56,13 +61,22 @@ on:
     types: [opened, edited, synchronize]
 
 jobs:
-  # Validates that PR title follows Conventional Commits specification
+  # Validates that PR title follows Conventional Commits 1.0.0 specification
   lint-pr-title:
-    name: 'Validate PR Title Format'
+    name: "validate format"
     runs-on: ubuntu-latest
     steps:
-      - name: '✅ Validate Conventional Commits Format'
-        uses: amannn/action-semantic-pull-request@v5
+      - name: "🚫 Reject empty scope"
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if [[ "$PR_TITLE" =~ ^[a-z]+\(\)[!]?: ]]; then
+            echo "::error::PR title has empty scope parentheses: '$PR_TITLE'"
+            echo "Either remove the parentheses or provide a scope (e.g., 'fix(core): ...')."
+            exit 1
+          fi
+      - name: "✅ Validate Conventional Commits Format"
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -79,11 +93,12 @@ jobs:
             chore
             revert
             release
+            hotfix
           scopes: |
             core
-            cli
             langchain
-            langchain_v1
+            langchain-classic
+            model-profiles
             standard-tests
             text-splitters
             docs
@@ -98,11 +113,13 @@ jobs:
             nomic
             ollama
             openai
+            openrouter
             perplexity
-            prompty
             qdrant
             xai
             infra
+            deps
+            partners
           requireScope: false
           disallowScopes: |
             release

@@ -1,11 +1,16 @@
 """Test text splitting functionality."""
 
+from __future__ import annotations
+
+import json
 import random
 import re
 import string
-from typing import Any, Callable
+import textwrap
+from typing import TYPE_CHECKING, Any
 
 import pytest
+from langchain_core._api import suppress_langchain_beta_warning
 from langchain_core.documents import Document
 
 from langchain_text_splitters import (
@@ -29,6 +34,12 @@ from langchain_text_splitters.markdown import (
 )
 from langchain_text_splitters.python import PythonCodeTextSplitter
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from bs4 import Tag
+
+
 FAKE_PYTHON_TEXT = """
 class Foo:
 
@@ -41,6 +52,133 @@ def testing_func():
 
 def bar():
 """
+
+
+def test_no_heavy_imports_on_package_load() -> None:
+    """Ensure importing the package does not eagerly import heavy dependencies.
+
+    Runs in a fresh interpreter so the result is unaffected by modules the test
+    session already imported. A `sys.meta_path` finder records any *attempt* to
+    import a heavy optional dependency, so the guard holds whether or not those
+    packages are installed in the current environment (a plain `sys.modules` check
+    would pass vacuously when the packages are absent).
+    """
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    script = textwrap.dedent(
+        """
+        import sys
+
+        blocked = {
+            "nltk", "spacy", "sentence_transformers", "konlpy", "torch",
+            "transformers", "tiktoken",
+        }
+        attempted = []
+
+        class _Recorder:
+            def find_spec(self, name, path=None, target=None):
+                if name.split(".")[0] in blocked:
+                    attempted.append(name.split(".")[0])
+                return None  # defer to the real finders
+
+        sys.meta_path.insert(0, _Recorder())
+        import langchain_text_splitters  # noqa: F401
+        print(",".join(sorted(set(attempted))))
+        """
+    )
+    result = subprocess.run(  # noqa: S603  # list args, no shell; input is static
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, (
+        f"Importing langchain_text_splitters failed:\n{result.stderr}"
+    )
+    attempted = [p for p in result.stdout.strip().split(",") if p]
+    assert not attempted, (
+        f"Heavy packages imported at langchain_text_splitters load time: {attempted}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("module_name", "expected_message"),
+    [
+        ("konlpy", "pip install konlpy"),
+        ("nltk", "pip install nltk"),
+        ("spacy", "pip install spacy"),
+        ("sentence_transformers", "pip install sentence-transformers"),
+    ],
+)
+def test_missing_optional_dependency_raises_importerror(
+    module_name: str,
+    expected_message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each splitter raises a helpful ImportError when its optional dep is missing.
+
+    The missing dependency is simulated by forcing its import to fail, so the test
+    is independent of whether the optional package is actually installed.
+    """
+    import sys  # noqa: PLC0415
+
+    from langchain_text_splitters.konlpy import KonlpyTextSplitter  # noqa: PLC0415
+    from langchain_text_splitters.nltk import NLTKTextSplitter  # noqa: PLC0415
+    from langchain_text_splitters.sentence_transformers import (  # noqa: PLC0415
+        SentenceTransformersTokenTextSplitter,
+    )
+    from langchain_text_splitters.spacy import SpacyTextSplitter  # noqa: PLC0415
+
+    constructors: dict[str, Callable[[], TextSplitter]] = {
+        "konlpy": KonlpyTextSplitter,
+        "nltk": NLTKTextSplitter,
+        "spacy": SpacyTextSplitter,
+        "sentence_transformers": SentenceTransformersTokenTextSplitter,
+    }
+
+    # `None` in sys.modules makes both `import x` and `import_module(x)` raise
+    # ImportError, exercising the splitter's missing-dependency branch.
+    monkeypatch.setitem(sys.modules, module_name, None)
+    with pytest.raises(ImportError, match=re.escape(expected_message)):
+        constructors[module_name]()
+
+
+@pytest.mark.parametrize(
+    "class_name",
+    [
+        "KonlpyTextSplitter",
+        "NLTKTextSplitter",
+        "SpacyTextSplitter",
+        "SentenceTransformersTokenTextSplitter",
+    ],
+)
+def test_lazy_getattr_resolves(class_name: str) -> None:
+    """`__getattr__` resolves lazy splitter classes from the package namespace."""
+    import langchain_text_splitters as lts  # noqa: PLC0415
+
+    try:
+        cls = getattr(lts, class_name)
+    except ImportError:
+        pytest.skip(f"Optional dependency for {class_name} not installed")
+    assert isinstance(cls, type), f"{class_name} should be a class, got {type(cls)}"
+
+
+def test_lazy_getattr_raises_for_unknown() -> None:
+    """Accessing an unknown attribute raises `AttributeError`."""
+    import langchain_text_splitters as lts  # noqa: PLC0415
+
+    with pytest.raises(AttributeError, match="no_such_thing"):
+        _ = lts.no_such_thing  # type: ignore[attr-defined]
+
+
+def test_lightweight_splitters_remain_eagerly_accessible() -> None:
+    """Lightweight splitters are still directly importable from the package."""
+    import langchain_text_splitters as lts  # noqa: PLC0415
+
+    assert issubclass(lts.RecursiveCharacterTextSplitter, lts.TextSplitter)
+    assert issubclass(lts.CharacterTextSplitter, lts.TextSplitter)
 
 
 def test_character_text_splitter() -> None:
@@ -97,13 +235,52 @@ def test_character_text_splitter_longer_words() -> None:
     assert output == expected_output
 
 
+# edge cases
+def test_character_text_splitter_no_separator_in_text() -> None:
+    """Text splitting where there is no separator but a single word."""
+    text = "singleword"
+    splitter = CharacterTextSplitter(separator=" ", chunk_size=10, chunk_overlap=0)
+    output = splitter.split_text(text)
+    expected_output = ["singleword"]
+    assert output == expected_output
+
+
+def test_character_text_splitter_handle_chunksize_equal_to_chunkoverlap() -> None:
+    """Text splitting safe guards when chunk size is equal chunk overlap."""
+    text = "hello"
+    splitter = CharacterTextSplitter(separator=" ", chunk_size=5, chunk_overlap=5)
+    output = splitter.split_text(text)
+    expected_output = ["hello"]
+    assert output == expected_output
+
+
+def test_character_text_splitter_empty_input() -> None:
+    """Test splitting safely where there is no input to process."""
+    text = ""
+    splitter = CharacterTextSplitter(separator=" ", chunk_size=5, chunk_overlap=0)
+    output = splitter.split_text(text)
+    expected_output: list[str] = []
+    assert output == expected_output
+
+
+def test_character_text_splitter_whitespace_only() -> None:
+    """Test splitting safely where there is white space."""
+    text = " "
+    splitter = CharacterTextSplitter(separator=" ", chunk_size=5, chunk_overlap=0)
+    output = splitter.split_text(text)
+    expected_output: list[str] = []
+    assert output == expected_output
+
+
 @pytest.mark.parametrize(
     ("separator", "is_separator_regex"), [(re.escape("."), True), (".", False)]
 )
 def test_character_text_splitter_keep_separator_regex(
     *, separator: str, is_separator_regex: bool
 ) -> None:
-    """Test splitting by characters while keeping the separator
+    """Test CharacterTextSplitter keep separator regex.
+
+    Test splitting by characters while keeping the separator
     that is a regex special character.
     """
     text = "foo.bar.baz.123"
@@ -125,7 +302,9 @@ def test_character_text_splitter_keep_separator_regex(
 def test_character_text_splitter_keep_separator_regex_start(
     *, separator: str, is_separator_regex: bool
 ) -> None:
-    """Test splitting by characters while keeping the separator
+    """Test CharacterTextSplitter keep separator regex and put at start.
+
+    Test splitting by characters while keeping the separator
     that is a regex special character and placing it at the start of each chunk.
     """
     text = "foo.bar.baz.123"
@@ -147,7 +326,9 @@ def test_character_text_splitter_keep_separator_regex_start(
 def test_character_text_splitter_keep_separator_regex_end(
     *, separator: str, is_separator_regex: bool
 ) -> None:
-    """Test splitting by characters while keeping the separator
+    """Test CharacterTextSplitter keep separator regex and put at end.
+
+    Test splitting by characters while keeping the separator
     that is a regex special character and placing it at the end of each chunk.
     """
     text = "foo.bar.baz.123"
@@ -169,8 +350,11 @@ def test_character_text_splitter_keep_separator_regex_end(
 def test_character_text_splitter_discard_separator_regex(
     *, separator: str, is_separator_regex: bool
 ) -> None:
-    """Test splitting by characters discarding the separator
-    that is a regex special character."""
+    """Test CharacterTextSplitter discard separator regex.
+
+    Test splitting by characters discarding the separator
+    that is a regex special character.
+    """
     text = "foo.bar.baz.123"
     splitter = CharacterTextSplitter(
         separator=separator,
@@ -210,12 +394,17 @@ def test_recursive_character_text_splitter_keep_separators() -> None:
 
 def test_character_text_splitting_args() -> None:
     """Test invalid arguments."""
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "Got a larger chunk overlap (4) than chunk size (2), should be smaller."
+        ),
+    ):
         CharacterTextSplitter(chunk_size=2, chunk_overlap=4)
     for invalid_size in (0, -1):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="chunk_size must be > 0, got"):
             CharacterTextSplitter(chunk_size=invalid_size)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="chunk_overlap must be >= 0, got -1"):
         CharacterTextSplitter(chunk_size=2, chunk_overlap=-1)
 
 
@@ -451,8 +640,10 @@ def test_jsx_text_splitter() -> None:
     splits = splitter.split_text(FAKE_JSX_TEXT)
 
     expected_splits = [
-        "\nimport React from 'react';\n"
-        "import OtherComponent from './OtherComponent';\n",
+        (
+            "\nimport React from 'react';\n"
+            "import OtherComponent from './OtherComponent';\n"
+        ),
         "\nfunction MyComponent() {\n  const [count, setCount] = React.useState(0);",
         "\n\n  const handleClick = () => {\n    setCount(count + 1);\n  };",
         "return (",
@@ -507,13 +698,17 @@ def test_vue_text_splitter() -> None:
         "<template>",
         "<div>",
         "<h1>{{ title }}</h1>",
-        '<button @click="increment">\n      Count is: {{ count }}\n'
-        "    </button>\n  </div>\n</template>",
+        (
+            '<button @click="increment">\n      Count is: {{ count }}\n'
+            "    </button>\n  </div>\n</template>"
+        ),
         "<script>",
         "export",
-        " default {\n  data() {\n    return {\n      title: 'Counter App',\n      "
-        "count: 0\n    }\n  },\n  methods: {\n    increment() {\n      "
-        "this.count++\n    }\n  }\n}\n</script>",
+        (
+            " default {\n  data() {\n    return {\n      title: 'Counter App',\n      "
+            "count: 0\n    }\n  },\n  methods: {\n    increment() {\n      "
+            "this.count++\n    }\n  }\n}\n</script>"
+        ),
         "<style>\nbutton {\n  color: blue;\n}\n</style>",
     ]
     assert [s.strip() for s in splits] == [s.strip() for s in expected_splits]
@@ -556,6 +751,34 @@ def test_svelte_text_splitter() -> None:
         "<style>\n  button {\n    color: blue;\n  }\n</style>",
     ]
     assert [s.strip() for s in splits] == [s.strip() for s in expected_splits]
+
+
+def test_jsx_splitter_separator_not_mutated_across_calls() -> None:
+    """Regression test: repeated split_text() calls must not mutate separators.
+
+    Calling split_text() multiple times on the same JSFrameworkTextSplitter
+    instance must not grow the internal separator list between calls.
+
+    Before the fix, self._separators was overwritten with the full expanded list
+    on every invocation, so a second call would start with the already-expanded
+    list and append even more separators.
+    """
+    splitter = JSFrameworkTextSplitter(chunk_size=30, chunk_overlap=0)
+
+    # Record separator count after constructing (should be 0 - no custom separators)
+    initial_sep_count = len(splitter._separators)
+
+    # Call split_text twice; the results should be identical for identical input
+    splits_first = splitter.split_text(FAKE_JSX_TEXT)
+    splits_second = splitter.split_text(FAKE_JSX_TEXT)
+
+    assert splits_first == splits_second, (
+        "split_text() must return identical results on repeated calls with the "
+        "same input"
+    )
+    assert len(splitter._separators) == initial_sep_count, (
+        "split_text() must not mutate self._separators between calls"
+    )
 
 
 CHUNK_SIZE = 16
@@ -916,6 +1139,23 @@ class Program
     ]
 
 
+def test_csharp_separators_no_java_keywords() -> None:
+    """C# separators should not contain Java-only keywords."""
+    splitter = RecursiveCharacterTextSplitter.from_language(
+        Language.CSHARP, chunk_size=CHUNK_SIZE, chunk_overlap=0
+    )
+    # "implements" is a Java keyword; C# uses ":" for interface implementation
+    assert "\nimplements " not in splitter._separators
+
+
+def test_elixir_separators_no_while() -> None:
+    """Elixir has no while loop; the separator should not be present."""
+    splitter = RecursiveCharacterTextSplitter.from_language(
+        Language.ELIXIR, chunk_size=CHUNK_SIZE, chunk_overlap=0
+    )
+    assert "\nwhile " not in splitter._separators
+
+
 def test_cpp_code_splitter() -> None:
     splitter = RecursiveCharacterTextSplitter.from_language(
         Language.CPP, chunk_size=CHUNK_SIZE, chunk_overlap=0
@@ -1049,6 +1289,35 @@ fn main() {
     assert chunks == ["fn main() {", 'println!("Hello', ",", 'World!");', "}"]
 
 
+def test_r_code_splitter() -> None:
+    splitter = RecursiveCharacterTextSplitter.from_language(
+        Language.R, chunk_size=CHUNK_SIZE, chunk_overlap=0
+    )
+    code = """
+library(dplyr)
+
+my_func <- function(x) {
+    return(x + 1)
+}
+
+if (TRUE) {
+    print("Hello")
+}
+    """
+    chunks = splitter.split_text(code)
+    assert chunks == [
+        "library(dplyr)",
+        "my_func <-",
+        "function(x) {",
+        "return(x +",
+        "1)",
+        "}",
+        "if (TRUE) {",
+        'print("Hello")',
+        "}",
+    ]
+
+
 def test_markdown_code_splitter() -> None:
     splitter = RecursiveCharacterTextSplitter.from_language(
         Language.MARKDOWN, chunk_size=CHUNK_SIZE, chunk_overlap=0
@@ -1164,7 +1433,6 @@ def test_html_code_splitter() -> None:
 
 def test_md_header_text_splitter_1() -> None:
     """Test markdown splitter by header: Case 1."""
-
     markdown_document = (
         "# Foo\n\n"
         "    ## Bar\n\n"
@@ -1235,7 +1503,6 @@ def test_md_header_text_splitter_2() -> None:
 
 def test_md_header_text_splitter_3() -> None:
     """Test markdown splitter by header: Case 3."""
-
     markdown_document = (
         "# Foo\n\n"
         "    ## Bar\n\n"
@@ -1290,7 +1557,6 @@ def test_md_header_text_splitter_3() -> None:
 
 def test_md_header_text_splitter_preserve_headers_1() -> None:
     """Test markdown splitter by header: Preserve Headers."""
-
     markdown_document = (
         "# Foo\n\n"
         "    ## Bat\n\n"
@@ -1324,7 +1590,6 @@ def test_md_header_text_splitter_preserve_headers_1() -> None:
 
 def test_md_header_text_splitter_preserve_headers_2() -> None:
     """Test markdown splitter by header: Preserve Headers."""
-
     markdown_document = (
         "# Foo\n\n"
         "    ## Bar\n\n"
@@ -1372,7 +1637,6 @@ def test_md_header_text_splitter_preserve_headers_2() -> None:
 @pytest.mark.parametrize("fence", [("```"), ("~~~")])
 def test_md_header_text_splitter_fenced_code_block(fence: str) -> None:
     """Test markdown splitter by header: Fenced code block."""
-
     markdown_document = (
         f"# This is a Header\n\n{fence}\nfoo()\n# Not a header\nbar()\n{fence}"
     )
@@ -1402,7 +1666,6 @@ def test_md_header_text_splitter_fenced_code_block_interleaved(
     fence: str, other_fence: str
 ) -> None:
     """Test markdown splitter by header: Interleaved fenced code block."""
-
     markdown_document = (
         "# This is a Header\n\n"
         f"{fence}\n"
@@ -1438,7 +1701,6 @@ def test_md_header_text_splitter_fenced_code_block_interleaved(
 @pytest.mark.parametrize("characters", ["\ufeff"])
 def test_md_header_text_splitter_with_invisible_characters(characters: str) -> None:
     """Test markdown splitter by header: Fenced code block."""
-
     markdown_document = f"{characters}# Foo\n\nfoo()\n{characters}## Bar\n\nbar()"
 
     headers_to_split_on = [
@@ -1609,7 +1871,6 @@ EXPERIMENTAL_MARKDOWN_DOCUMENT = (
 
 def test_experimental_markdown_syntax_text_splitter() -> None:
     """Test experimental markdown syntax splitter."""
-
     markdown_splitter = ExperimentalMarkdownSyntaxTextSplitter()
     output = markdown_splitter.split_text(EXPERIMENTAL_MARKDOWN_DOCUMENT)
 
@@ -1663,7 +1924,6 @@ def test_experimental_markdown_syntax_text_splitter() -> None:
 
 def test_experimental_markdown_syntax_text_splitter_header_configuration() -> None:
     """Test experimental markdown syntax splitter."""
-
     headers_to_split_on = [("#", "Encabezamiento 1")]
 
     markdown_splitter = ExperimentalMarkdownSyntaxTextSplitter(
@@ -1709,7 +1969,6 @@ def test_experimental_markdown_syntax_text_splitter_header_configuration() -> No
 
 def test_experimental_markdown_syntax_text_splitter_with_headers() -> None:
     """Test experimental markdown syntax splitter."""
-
     markdown_splitter = ExperimentalMarkdownSyntaxTextSplitter(strip_headers=False)
     output = markdown_splitter.split_text(EXPERIMENTAL_MARKDOWN_DOCUMENT)
 
@@ -1768,7 +2027,6 @@ def test_experimental_markdown_syntax_text_splitter_with_headers() -> None:
 
 def test_experimental_markdown_syntax_text_splitter_split_lines() -> None:
     """Test experimental markdown syntax splitter."""
-
     markdown_splitter = ExperimentalMarkdownSyntaxTextSplitter(return_each_line=True)
     output = markdown_splitter.split_text(EXPERIMENTAL_MARKDOWN_DOCUMENT)
 
@@ -1876,8 +2134,11 @@ EXPERIMENTAL_MARKDOWN_DOCUMENTS = [
 
 
 def test_experimental_markdown_syntax_text_splitter_on_multi_files() -> None:
-    """Test experimental markdown syntax splitter split
-    on default called consecutively on two files."""
+    """Test ExperimentalMarkdownSyntaxTextSplitter on multiple files.
+
+    Test experimental markdown syntax splitter split on default called consecutively
+    on two files.
+    """
     markdown_splitter = ExperimentalMarkdownSyntaxTextSplitter()
     output = []
     for experimental_markdown_document in EXPERIMENTAL_MARKDOWN_DOCUMENTS:
@@ -1958,8 +2219,11 @@ def test_experimental_markdown_syntax_text_splitter_on_multi_files() -> None:
 def test_experimental_markdown_syntax_text_splitter_split_lines_on_multi_files() -> (
     None
 ):
-    """Test experimental markdown syntax splitter split
-    on each line called consecutively on two files."""
+    """Test ExperimentalMarkdownSyntaxTextSplitter split lines on multiple files.
+
+    Test experimental markdown syntax splitter split on each line called consecutively
+    on two files.
+    """
     markdown_splitter = ExperimentalMarkdownSyntaxTextSplitter(return_each_line=True)
     output = []
     for experimental_markdown_document in EXPERIMENTAL_MARKDOWN_DOCUMENTS:
@@ -2083,9 +2347,10 @@ def test_experimental_markdown_syntax_text_splitter_split_lines_on_multi_files()
 def test_experimental_markdown_syntax_text_splitter_with_header_on_multi_files() -> (
     None
 ):
-    """Test experimental markdown splitter
-    by header called consecutively on two files"""
+    """Test ExperimentalMarkdownSyntaxTextSplitter with header on multiple files.
 
+    Test experimental markdown splitter by header called consecutively on two files.
+    """
     markdown_splitter = ExperimentalMarkdownSyntaxTextSplitter(strip_headers=False)
     output = []
     for experimental_markdown_document in EXPERIMENTAL_MARKDOWN_DOCUMENTS:
@@ -2171,9 +2436,11 @@ def test_experimental_markdown_syntax_text_splitter_with_header_on_multi_files()
 def test_experimental_markdown_syntax_text_splitter_header_config_on_multi_files() -> (
     None
 ):
-    """Test experimental markdown splitter
-    by header configuration called consecutively on two files"""
+    """Test ExperimentalMarkdownSyntaxTextSplitter header config on multiple files.
 
+    Test experimental markdown splitter by header configuration called consecutively
+    on two files.
+    """
     headers_to_split_on = [("#", "Encabezamiento 1")]
     markdown_splitter = ExperimentalMarkdownSyntaxTextSplitter(
         headers_to_split_on=headers_to_split_on
@@ -2350,13 +2617,16 @@ def test_haskell_code_splitter() -> None:
 
 
 @pytest.fixture
-@pytest.mark.requires("bs4")
 def html_header_splitter_splitter_factory() -> Callable[
     [list[tuple[str, str]]], HTMLHeaderTextSplitter
 ]:
-    """
-    Fixture to create an HTMLHeaderTextSplitter instance with given headers.
+    """Fixture to create an `HTMLHeaderTextSplitter` instance with given headers.
+
     This factory allows dynamic creation of splitters with different headers.
+
+    Returns:
+        Factory function that takes a list of headers to split on and returns an
+        `HTMLHeaderTextSplitter` instance.
     """
 
     def _create_splitter(
@@ -2553,38 +2823,38 @@ def html_header_splitter_splitter_factory() -> Callable[
 )
 @pytest.mark.requires("bs4")
 def test_html_header_text_splitter(
-    html_header_splitter_splitter_factory: Any,
+    html_header_splitter_splitter_factory: Callable[
+        [list[tuple[str, str]]], HTMLHeaderTextSplitter
+    ],
     headers_to_split_on: list[tuple[str, str]],
     html_input: str,
     expected_documents: list[Document],
     test_case: str,
 ) -> None:
-    """
-    Test the HTML header text splitter.
+    """Test the HTML header text splitter.
 
     Args:
-        html_header_splitter_splitter_factory (Any): Factory function to create
-            the HTML header splitter.
-        headers_to_split_on (List[Tuple[str, str]]): List of headers to split on.
-        html_input (str): The HTML input string to be split.
-        expected_documents (List[Document]): List of expected Document objects.
-        test_case (str): Description of the test case.
+        html_header_splitter_splitter_factory : Factory function to create the HTML
+            header splitter.
+        headers_to_split_on: List of headers to split on.
+        html_input: The HTML input string to be split.
+        expected_documents: List of expected Document objects.
+        test_case: Description of the test case.
 
     Raises:
         AssertionError: If the number of documents or their content/metadata
             does not match the expected values.
     """
-
-    splitter = html_header_splitter_splitter_factory(
-        headers_to_split_on=headers_to_split_on
-    )
+    splitter = html_header_splitter_splitter_factory(headers_to_split_on)
     docs = splitter.split_text(html_input)
 
     assert len(docs) == len(expected_documents), (
         f"Test Case '{test_case}' Failed: Number of documents mismatch. "
         f"Expected {len(expected_documents)}, got {len(docs)}."
     )
-    for idx, (doc, expected) in enumerate(zip(docs, expected_documents), start=1):
+    for idx, (doc, expected) in enumerate(
+        zip(docs, expected_documents, strict=False), start=1
+    ):
         assert doc.page_content == expected.page_content, (
             f"Test Case '{test_case}' Failed at Document {idx}: "
             f"Content mismatch.\nExpected: {expected.page_content}"
@@ -2709,37 +2979,38 @@ def test_html_header_text_splitter(
 )
 @pytest.mark.requires("bs4")
 def test_additional_html_header_text_splitter(
-    html_header_splitter_splitter_factory: Any,
+    html_header_splitter_splitter_factory: Callable[
+        [list[tuple[str, str]]], HTMLHeaderTextSplitter
+    ],
     headers_to_split_on: list[tuple[str, str]],
     html_content: str,
     expected_output: list[Document],
     test_case: str,
 ) -> None:
-    """
-    Test the HTML header text splitter.
+    """Test the HTML header text splitter.
 
     Args:
-        html_header_splitter_splitter_factory (Any): Factory function to create
-            the HTML header splitter.
-        headers_to_split_on (List[Tuple[str, str]]): List of headers to split on.
-        html_content (str): HTML content to be split.
-        expected_output (List[Document]): Expected list of Document objects.
-        test_case (str): Description of the test case.
+        html_header_splitter_splitter_factory: Factory function to create the HTML
+            header splitter.
+        headers_to_split_on: List of headers to split on.
+        html_content: HTML content to be split.
+        expected_output: Expected list of `Document` objects.
+        test_case: Description of the test case.
 
     Raises:
         AssertionError: If the number of documents or their content/metadata
             does not match the expected output.
     """
-    splitter = html_header_splitter_splitter_factory(
-        headers_to_split_on=headers_to_split_on
-    )
+    splitter = html_header_splitter_splitter_factory(headers_to_split_on)
     docs = splitter.split_text(html_content)
 
     assert len(docs) == len(expected_output), (
         f"{test_case} Failed: Number of documents mismatch. "
         f"Expected {len(expected_output)}, got {len(docs)}."
     )
-    for idx, (doc, expected) in enumerate(zip(docs, expected_output), start=1):
+    for idx, (doc, expected) in enumerate(
+        zip(docs, expected_output, strict=False), start=1
+    ):
         assert doc.page_content == expected.page_content, (
             f"{test_case} Failed at Document {idx}: "
             f"Content mismatch.\nExpected: {expected.page_content}\n"
@@ -2780,36 +3051,38 @@ def test_additional_html_header_text_splitter(
 )
 @pytest.mark.requires("bs4")
 def test_html_no_headers_with_multiple_splitters(
-    html_header_splitter_splitter_factory: Any,
+    html_header_splitter_splitter_factory: Callable[
+        [list[tuple[str, str]]], HTMLHeaderTextSplitter
+    ],
     headers_to_split_on: list[tuple[str, str]],
     html_content: str,
     expected_output: list[Document],
     test_case: str,
 ) -> None:
-    """
-    Test HTML content splitting without headers using multiple splitters.
+    """Test HTML content splitting without headers using multiple splitters.
+
     Args:
-        html_header_splitter_splitter_factory (Any): Factory to create the
-            HTML header splitter.
-        headers_to_split_on (List[Tuple[str, str]]): List of headers to split on.
-        html_content (str): HTML content to be split.
-        expected_output (List[Document]): Expected list of Document objects
-            after splitting.
-        test_case (str): Description of the test case.
+        html_header_splitter_splitter_factory: Factory to create the HTML header
+            splitter.
+        headers_to_split_on: List of headers to split on.
+        html_content: HTML content to be split.
+        expected_output: Expected list of `Document` objects after splitting.
+        test_case: Description of the test case.
+
     Raises:
         AssertionError: If the number of documents or their content/metadata
             does not match the expected output.
     """
-    splitter = html_header_splitter_splitter_factory(
-        headers_to_split_on=headers_to_split_on
-    )
+    splitter = html_header_splitter_splitter_factory(headers_to_split_on)
     docs = splitter.split_text(html_content)
 
     assert len(docs) == len(expected_output), (
         f"{test_case} Failed: Number of documents mismatch. "
         f"Expected {len(expected_output)}, got {len(docs)}."
     )
-    for idx, (doc, expected) in enumerate(zip(docs, expected_output), start=1):
+    for idx, (doc, expected) in enumerate(
+        zip(docs, expected_output, strict=False), start=1
+    ):
         assert doc.page_content == expected.page_content, (
             f"{test_case} Failed at Document {idx}: "
             f"Content mismatch.\nExpected: {expected.page_content}\n"
@@ -2833,6 +3106,21 @@ def test_split_text_on_tokens() -> None:
     )
     output = split_text_on_tokens(text=text, tokenizer=tokenizer)
     expected_output = ["foo bar", "bar baz", "baz 123"]
+    assert output == expected_output
+
+
+def test_decode_returns_no_chunks() -> None:
+    """Test that when decode returns only empty strings, output is empty, not ['']."""
+    text = "foo bar baz 123"
+
+    tokenizer = Tokenizer(
+        chunk_overlap=3,
+        tokens_per_chunk=7,
+        decode=(lambda _: ""),
+        encode=(lambda it: [ord(c) for c in it]),
+    )
+    output = split_text_on_tokens(text=text, tokenizer=tokenizer)
+    expected_output: list[Any] = []
     assert output == expected_output
 
 
@@ -3046,18 +3334,19 @@ def test_happy_path_splitting_with_duplicate_header_tag() -> None:
 
 
 def test_split_json() -> None:
-    """Test json text splitter"""
+    """Test json text splitter."""
     max_chunk = 800
     splitter = RecursiveJsonSplitter(max_chunk_size=max_chunk)
 
     def random_val() -> str:
         return "".join(random.choices(string.ascii_letters, k=random.randint(4, 12)))
 
-    test_data: Any = {
+    val1: dict[str, Any] = {f"val1{i}": random_val() for i in range(100)}
+    val1["val16"] = {f"val16{i}": random_val() for i in range(100)}
+    test_data: dict[str, Any] = {
         "val0": random_val(),
-        "val1": {f"val1{i}": random_val() for i in range(100)},
+        "val1": val1,
     }
-    test_data["val1"]["val16"] = {f"val16{i}": random_val() for i in range(100)}
 
     # uses create_docs and split_text
     docs = splitter.create_documents(texts=[test_data])
@@ -3068,18 +3357,19 @@ def test_split_json() -> None:
 
 
 def test_split_json_with_lists() -> None:
-    """Test json text splitter with list conversion"""
+    """Test json text splitter with list conversion."""
     max_chunk = 800
     splitter = RecursiveJsonSplitter(max_chunk_size=max_chunk)
 
     def random_val() -> str:
         return "".join(random.choices(string.ascii_letters, k=random.randint(4, 12)))
 
-    test_data: Any = {
+    val1: dict[str, Any] = {f"val1{i}": random_val() for i in range(100)}
+    val1["val16"] = {f"val16{i}": random_val() for i in range(100)}
+    test_data: dict[str, Any] = {
         "val0": random_val(),
-        "val1": {f"val1{i}": random_val() for i in range(100)},
+        "val1": val1,
     }
-    test_data["val1"]["val16"] = {f"val16{i}": random_val() for i in range(100)}
 
     test_data_list: Any = {"testPreprocessing": [test_data]}
 
@@ -3109,6 +3399,168 @@ def test_split_json_many_calls() -> None:
 
     assert chunk0 == chunk0_output
     assert chunk1 == chunk1_output
+
+
+def test_split_json_with_empty_dict_values() -> None:
+    """Test that empty dicts in JSON values are preserved, not dropped."""
+    splitter = RecursiveJsonSplitter(max_chunk_size=300)
+
+    data: dict[str, Any] = {
+        "a": "hello",
+        "b": {},
+        "c": "world",
+    }
+    chunks = splitter.split_json(data)
+    # Recombine all chunks into a single dict
+    merged: dict[str, Any] = {}
+    for chunk in chunks:
+        merged.update(chunk)
+
+    assert merged == {"a": "hello", "b": {}, "c": "world"}
+
+
+def test_split_json_with_nested_empty_dicts() -> None:
+    """Test that nested empty dicts are preserved."""
+    splitter = RecursiveJsonSplitter(max_chunk_size=300)
+
+    data: dict[str, Any] = {
+        "level1": {
+            "level2a": {},
+            "level2b": "value",
+        }
+    }
+    chunks = splitter.split_json(data)
+    merged: dict[str, Any] = {}
+    for chunk in chunks:
+        merged.update(chunk)
+
+    assert merged == {"level1": {"level2a": {}, "level2b": "value"}}
+
+
+def test_split_json_empty_dict_only() -> None:
+    """Test splitting a JSON that contains only an empty dict at the top level.
+
+    An empty top-level dict should produce a single empty chunk (or no chunks).
+    """
+    splitter = RecursiveJsonSplitter(max_chunk_size=300)
+
+    data: dict[str, Any] = {}
+    chunks = splitter.split_json(data)
+    # With nothing to split, result should be empty list
+    assert chunks == []
+
+
+def test_split_json_mixed_empty_and_nonempty_dicts() -> None:
+    """Test a realistic structure mixing empty and non-empty nested dicts."""
+    splitter = RecursiveJsonSplitter(max_chunk_size=300)
+
+    data: dict[str, Any] = {
+        "config": {},
+        "metadata": {"author": "test", "tags": {}},
+        "content": "some text",
+    }
+    chunks = splitter.split_json(data)
+    merged: dict[str, Any] = {}
+    for chunk in chunks:
+        for k, v in chunk.items():
+            if k in merged and isinstance(merged[k], dict) and isinstance(v, dict):
+                merged[k].update(v)
+            else:
+                merged[k] = v
+
+    assert merged["config"] == {}
+    assert merged["metadata"] == {"author": "test", "tags": {}}
+    assert merged["content"] == "some text"
+
+
+def test_split_json_empty_dict_value_in_large_payload() -> None:
+    """Test that empty dict values survive chunking in a larger payload."""
+    max_chunk = 200
+    splitter = RecursiveJsonSplitter(max_chunk_size=max_chunk)
+
+    data: dict[str, Any] = {
+        "key0": "x" * 50,
+        "empty": {},
+        "key1": "y" * 50,
+        "nested": {f"k{i}": f"v{i}" for i in range(20)},
+    }
+    chunks = splitter.split_json(data)
+
+    # Verify all chunks are within size limits
+    for chunk in chunks:
+        assert len(json.dumps(chunk)) < max_chunk * 1.05
+
+    # Verify the empty dict is somewhere in the chunks
+    found_empty = False
+    for chunk in chunks:
+        # Walk nested structure to find "empty": {}
+        if "empty" in chunk and chunk["empty"] == {}:
+            found_empty = True
+            break
+        for v in chunk.values():
+            if isinstance(v, dict) and "empty" in v and v["empty"] == {}:
+                found_empty = True
+                break
+    assert found_empty, "Empty dict value was lost during splitting"
+
+
+@pytest.mark.parametrize(
+    ("data", "type_name"),
+    [
+        ([{"a": 1}, {"b": 2}], "list"),
+        ("hello world", "str"),
+        (123, "int"),
+        (True, "bool"),
+    ],
+)
+def test_split_json_non_dict_input_raises(data: object, type_name: str) -> None:
+    """Non-dict, non-convertible top-level input raises TypeError, not silent []."""
+    splitter = RecursiveJsonSplitter(max_chunk_size=50)
+
+    with pytest.raises(TypeError, match=type_name):
+        splitter.split_json(data)  # ty: ignore[invalid-argument-type]
+
+
+def test_split_json_list_without_convert_lists_error_mentions_escape_hatch() -> None:
+    """The error for a bare list should point users at convert_lists=True."""
+    splitter = RecursiveJsonSplitter(max_chunk_size=50)
+
+    with pytest.raises(TypeError, match="convert_lists=True"):
+        splitter.split_json([{"a": 1}, {"b": 2}])  # ty: ignore[invalid-argument-type]
+
+
+def test_split_json_list_with_convert_lists_still_works() -> None:
+    """Regression guard: convert_lists=True must keep working for top-level lists."""
+    splitter = RecursiveJsonSplitter(max_chunk_size=50)
+
+    data = [{"a": 1}, {"b": 2}]
+    chunks = splitter.split_json(data, convert_lists=True)  # ty: ignore[invalid-argument-type]
+
+    assert chunks == [{"0": {"a": 1}, "1": {"b": 2}}]
+
+
+def test_split_json_none_input_returns_empty_list() -> None:
+    """Regression guard: None stays a no-op (matches split_json({}) -> [])."""
+    splitter = RecursiveJsonSplitter(max_chunk_size=50)
+
+    assert splitter.split_json(None) == []  # ty: ignore[invalid-argument-type]
+
+
+def test_split_json_none_input_returns_empty_list_with_convert_lists() -> None:
+    """Regression guard: None stays a no-op even when convert_lists=True."""
+    splitter = RecursiveJsonSplitter(max_chunk_size=50)
+
+    assert splitter.split_json(None, convert_lists=True) == []  # ty: ignore[invalid-argument-type]
+
+
+def test_split_json_convert_lists_true_non_list_no_misleading_hint() -> None:
+    """The convert_lists=True hint shouldn't appear when it wouldn't help."""
+    splitter = RecursiveJsonSplitter(max_chunk_size=50)
+
+    with pytest.raises(TypeError, match="str") as exc_info:
+        splitter.split_json("hello world", convert_lists=True)  # ty: ignore[invalid-argument-type]
+
+    assert "convert_lists" not in str(exc_info.value)
 
 
 def test_powershell_code_splitter_short_code() -> None:
@@ -3240,7 +3692,7 @@ def test_visualbasic6_code_splitter() -> None:
     ]
 
 
-def custom_iframe_extractor(iframe_tag: Any) -> str:
+def custom_iframe_extractor(iframe_tag: Tag) -> str:
     iframe_src = iframe_tag.get("src", "")
     return f"[iframe:{iframe_src}]({iframe_src})"
 
@@ -3253,11 +3705,12 @@ def test_html_splitter_with_custom_extractor() -> None:
     <p>This is an iframe:</p>
     <iframe src="http://example.com"></iframe>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")],
-        custom_handlers={"iframe": custom_iframe_extractor},
-        max_chunk_size=1000,
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            custom_handlers={"iframe": custom_iframe_extractor},
+            max_chunk_size=1000,
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3278,11 +3731,12 @@ def test_html_splitter_with_href_links() -> None:
     <h1>Section 1</h1>
     <p>This is a link to <a href="http://example.com">example.com</a></p>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")],
-        preserve_links=True,
-        max_chunk_size=1000,
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            preserve_links=True,
+            max_chunk_size=1000,
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3307,9 +3761,10 @@ def test_html_splitter_with_nested_elements() -> None:
         </div>
     </div>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")], max_chunk_size=1000
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")], max_chunk_size=1000
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3324,8 +3779,11 @@ def test_html_splitter_with_nested_elements() -> None:
 
 @pytest.mark.requires("bs4")
 def test_html_splitter_with_preserved_elements() -> None:
-    """Test HTML splitting with preserved elements like <table>, <ul> with low chunk
-    size."""
+    """Test HTML splitter with preserved elements.
+
+    Test HTML splitting with preserved elements like <table>, <ul> with low chunk
+    size.
+    """
     html_content = """
     <h1>Section 1</h1>
     <table>
@@ -3337,11 +3795,12 @@ def test_html_splitter_with_preserved_elements() -> None:
         <li>Item 2</li>
     </ul>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")],
-        elements_to_preserve=["table", "ul"],
-        max_chunk_size=50,  # Deliberately low to test preservation
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            elements_to_preserve=["table", "ul"],
+            max_chunk_size=50,  # Deliberately low to test preservation
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3355,6 +3814,100 @@ def test_html_splitter_with_preserved_elements() -> None:
 
 
 @pytest.mark.requires("bs4")
+def test_html_splitter_with_nested_preserved_elements() -> None:
+    """Test HTML splitter with preserved elements nested in containers.
+
+    Test that preserved elements are correctly preserved even when they are
+    nested inside other container elements like <section> or <article>.
+    This is a regression test for issue #31569
+    """
+    html_content = """
+    <article>
+        <h1>Section 1</h1>
+        <section>
+            <p>Some context about the data:</p>
+            <table>
+                <tr><td>Col1</td><td>Col2</td></tr>
+                <tr><td>Data1</td><td>Data2</td></tr>
+            </table>
+            <p>Conclusion about data.</p>
+        </section>
+    </article>
+    """
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            elements_to_preserve=["table"],
+            max_chunk_size=1000,
+        )
+    documents = splitter.split_text(html_content)
+
+    # The table should be preserved in the output
+    assert len(documents) == 1
+    content = documents[0].page_content
+    # Check that the table structure is maintained (not flattened)
+    assert "Col1" in content
+    assert "Col2" in content
+    assert "Data1" in content
+    assert "Data2" in content
+    # Check metadata
+    assert documents[0].metadata == {"Header 1": "Section 1"}
+
+
+@pytest.mark.requires("bs4")
+def test_html_splitter_with_nested_div_preserved() -> None:
+    """Test HTML splitter preserving nested div elements.
+
+    Nested div elements should be preserved when specified in elements_to_preserve
+    """
+    html_content = """
+    <div>
+        <h1>Header</h1>
+        <p>outer text</p>
+        <div>inner div content</div>
+        <p>more outer text</p>
+    </div>
+    """
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            elements_to_preserve=["div"],
+            max_chunk_size=1000,
+        )
+    documents = splitter.split_text(html_content)
+
+    assert len(documents) == 1
+    content = documents[0].page_content
+    # The inner div content should be preserved
+    assert "inner div content" in content
+    assert "outer text" in content
+    assert "more outer text" in content
+
+
+@pytest.mark.requires("bs4")
+def test_html_splitter_preserve_nested_in_paragraph() -> None:
+    """Test preserving deeply nested elements (code inside paragraph).
+
+    tests the case where a preserved element (<code>) is nested
+    inside a non-container element (<p>)
+    """
+    html_content = "<p>before <code>KEEP_THIS</code> after</p>"
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[],
+            elements_to_preserve=["code"],
+        )
+    documents = splitter.split_text(html_content)
+
+    assert len(documents) == 1
+    content = documents[0].page_content
+    # All text should be preserved
+    assert "before" in content
+    assert "KEEP_THIS" in content
+    assert "after" in content
+
+
+@pytest.mark.requires("bs4")
 def test_html_splitter_with_no_further_splits() -> None:
     """Test HTML splitting that requires no further splits beyond sections."""
     html_content = """
@@ -3363,9 +3916,10 @@ def test_html_splitter_with_no_further_splits() -> None:
     <h1>Section 2</h1>
     <p>More content here.</p>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")], max_chunk_size=1000
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")], max_chunk_size=1000
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3384,9 +3938,10 @@ def test_html_splitter_with_small_chunk_size() -> None:
     <p>This is some long text that should be split into multiple chunks due to the
     small chunk size.</p>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")], max_chunk_size=20, chunk_overlap=5
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")], max_chunk_size=20, chunk_overlap=5
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3411,11 +3966,12 @@ def test_html_splitter_with_denylist_tags() -> None:
     <p>This paragraph should be kept.</p>
     <span>This span should be removed.</span>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")],
-        denylist_tags=["span"],
-        max_chunk_size=1000,
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            denylist_tags=["span"],
+            max_chunk_size=1000,
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3435,11 +3991,12 @@ def test_html_splitter_with_external_metadata() -> None:
     <h1>Section 1</h1>
     <p>This is some content.</p>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")],
-        external_metadata={"source": "example.com"},
-        max_chunk_size=1000,
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            external_metadata={"source": "example.com"},
+            max_chunk_size=1000,
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3459,11 +4016,12 @@ def test_html_splitter_with_text_normalization() -> None:
     <h1>Section 1</h1>
     <p>This is some TEXT that should be normalized!</p>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")],
-        normalize_text=True,
-        max_chunk_size=1000,
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            normalize_text=True,
+            max_chunk_size=1000,
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3485,11 +4043,12 @@ def test_html_splitter_with_allowlist_tags() -> None:
     <span>This span should be kept.</span>
     <div>This div should be removed.</div>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")],
-        allowlist_tags=["p", "span"],
-        max_chunk_size=1000,
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            allowlist_tags=["p", "span"],
+            max_chunk_size=1000,
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3518,12 +4077,13 @@ def test_html_splitter_with_mixed_preserve_and_filter() -> None:
     <p>This paragraph should be kept.</p>
     <span>This span should be removed.</span>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")],
-        elements_to_preserve=["table"],
-        denylist_tags=["span"],
-        max_chunk_size=1000,
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            elements_to_preserve=["table"],
+            denylist_tags=["span"],
+            max_chunk_size=1000,
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3544,10 +4104,11 @@ def test_html_splitter_with_no_headers() -> None:
     <p>This is content without any headers.</p>
     <p>It should still produce a valid document.</p>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[],
-        max_chunk_size=1000,
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[],
+            max_chunk_size=1000,
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3563,8 +4124,11 @@ def test_html_splitter_with_no_headers() -> None:
 
 @pytest.mark.requires("bs4")
 def test_html_splitter_with_media_preservation() -> None:
-    """Test HTML splitting with media elements preserved and converted to Markdown-like
-    links."""
+    """Test HTML splitter with media preservation.
+
+    Test HTML splitting with media elements preserved and converted to Markdown-like
+    links.
+    """
     html_content = """
     <h1>Section 1</h1>
     <p>This is an image:</p>
@@ -3574,13 +4138,14 @@ def test_html_splitter_with_media_preservation() -> None:
     <p>This is audio:</p>
     <audio src="http://example.com/audio.mp3"></audio>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")],
-        preserve_images=True,
-        preserve_videos=True,
-        preserve_audio=True,
-        max_chunk_size=1000,
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            preserve_images=True,
+            preserve_videos=True,
+            preserve_audio=True,
+            max_chunk_size=1000,
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3600,17 +4165,18 @@ def test_html_splitter_with_media_preservation() -> None:
 
 @pytest.mark.requires("bs4")
 def test_html_splitter_keep_separator_true() -> None:
-    """Test HTML splitting with keep_separator=True"""
+    """Test HTML splitting with keep_separator=True."""
     html_content = """
     <h1>Section 1</h1>
     <p>This is some text. This is some other text.</p>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")],
-        max_chunk_size=10,
-        separators=[". "],
-        keep_separator=True,
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            max_chunk_size=10,
+            separators=[". "],
+            keep_separator=True,
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3629,17 +4195,18 @@ def test_html_splitter_keep_separator_true() -> None:
 
 @pytest.mark.requires("bs4")
 def test_html_splitter_keep_separator_false() -> None:
-    """Test HTML splitting with keep_separator=False"""
+    """Test HTML splitting with keep_separator=False."""
     html_content = """
     <h1>Section 1</h1>
     <p>This is some text. This is some other text.</p>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")],
-        max_chunk_size=10,
-        separators=[". "],
-        keep_separator=False,
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            max_chunk_size=10,
+            separators=[". "],
+            keep_separator=False,
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3658,17 +4225,18 @@ def test_html_splitter_keep_separator_false() -> None:
 
 @pytest.mark.requires("bs4")
 def test_html_splitter_keep_separator_start() -> None:
-    """Test HTML splitting with keep_separator="start" """
+    """Test HTML splitting with keep_separator="start"."""
     html_content = """
     <h1>Section 1</h1>
     <p>This is some text. This is some other text.</p>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")],
-        max_chunk_size=10,
-        separators=[". "],
-        keep_separator="start",
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            max_chunk_size=10,
+            separators=[". "],
+            keep_separator="start",
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3687,17 +4255,18 @@ def test_html_splitter_keep_separator_start() -> None:
 
 @pytest.mark.requires("bs4")
 def test_html_splitter_keep_separator_end() -> None:
-    """Test HTML splitting with keep_separator="end" """
+    """Test HTML splitting with keep_separator="end"."""
     html_content = """
     <h1>Section 1</h1>
     <p>This is some text. This is some other text.</p>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")],
-        max_chunk_size=10,
-        separators=[". "],
-        keep_separator="end",
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            max_chunk_size=10,
+            separators=[". "],
+            keep_separator="end",
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3716,14 +4285,17 @@ def test_html_splitter_keep_separator_end() -> None:
 
 @pytest.mark.requires("bs4")
 def test_html_splitter_keep_separator_default() -> None:
-    """Test HTML splitting with keep_separator not set"""
+    """Test HTML splitting with keep_separator not set."""
     html_content = """
     <h1>Section 1</h1>
     <p>This is some text. This is some other text.</p>
     """
-    splitter = HTMLSemanticPreservingSplitter(
-        headers_to_split_on=[("h1", "Header 1")], max_chunk_size=10, separators=[". "]
-    )
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            max_chunk_size=10,
+            separators=[". "],
+        )
     documents = splitter.split_text(html_content)
 
     expected = [
@@ -3738,6 +4310,79 @@ def test_html_splitter_keep_separator_default() -> None:
     ]
 
     assert documents == expected
+
+
+@pytest.mark.requires("bs4")
+def test_html_splitter_preserved_elements_reverse_order() -> None:
+    """Test HTML splitter with preserved elements and conflicting placeholders.
+
+    This test validates that preserved elements are reinserted in reverse order
+    to prevent conflicts when one placeholder might be a substring of another.
+    """
+    html_content = """
+    <h1>Section 1</h1>
+    <table>
+        <tr><td>Table 1 content</td></tr>
+    </table>
+    <p>Some text between tables</p>
+    <table>
+        <tr><td>Table 10 content</td></tr>
+    </table>
+    <ul>
+        <li>List item 1</li>
+        <li>List item 10</li>
+    </ul>
+    """
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[("h1", "Header 1")],
+            elements_to_preserve=["table", "ul"],
+            max_chunk_size=100,
+        )
+    documents = splitter.split_text(html_content)
+
+    # Verify that all preserved elements are correctly reinserted
+    # This would fail if placeholders were processed in forward order
+    # when one placeholder is a substring of another
+    assert len(documents) >= 1
+    # Check that table content is preserved
+    content = " ".join(doc.page_content for doc in documents)
+    assert "Table 1 content" in content
+    assert "Table 10 content" in content
+    assert "List item 1" in content
+    assert "List item 10" in content
+
+
+@pytest.mark.requires("bs4")
+def test_html_splitter_replacement_order() -> None:
+    body = textwrap.dedent(
+        """
+        <p>Hello1</p>
+        <p>Hello2</p>
+        <p>Hello3</p>
+        <p>Hello4</p>
+        <p>Hello5</p>
+        <p>Hello6</p>
+        <p>Hello7</p>
+        <p>Hello8</p>
+        <p>Hello9</p>
+        <p>Hello10</p>
+        <p>Hello11</p>
+        <p>Hello12</p>
+        <p>Hello13</p>
+        <p>Hello14</p>
+        """
+    )
+
+    with suppress_langchain_beta_warning():
+        splitter = HTMLSemanticPreservingSplitter(
+            headers_to_split_on=[],
+            elements_to_preserve=["p"],
+        )
+    documents = splitter.split_text(body)
+    assert len(documents) == 1
+    content = documents[0].page_content
+    assert content == " ".join([f"Hello{i}" for i in range(1, 15)])
 
 
 def test_character_text_splitter_discard_regex_separator_on_merge() -> None:

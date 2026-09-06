@@ -1,13 +1,11 @@
 """Standard LangChain interface tests"""
 
-import base64
 from pathlib import Path
 from typing import Literal, cast
 
-import httpx
 import pytest
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 from langchain_tests.integration_tests import ChatModelIntegrationTests
 
 from langchain_openai import ChatOpenAI
@@ -22,7 +20,7 @@ class TestOpenAIStandard(ChatModelIntegrationTests):
 
     @property
     def chat_model_params(self) -> dict:
-        return {"model": "gpt-4o-mini", "stream_usage": True}
+        return {"model": "gpt-4o-mini"}
 
     @property
     def supports_image_inputs(self) -> bool:
@@ -62,7 +60,7 @@ class TestOpenAIStandard(ChatModelIntegrationTests):
         return True
 
     def invoke_with_cache_read_input(self, *, stream: bool = False) -> AIMessage:
-        with open(REPO_ROOT_DIR / "README.md") as f:
+        with Path.open(REPO_ROOT_DIR / "README.md") as f:
             readme = f.read()
 
         input_ = f"""What's langchain? Here's the langchain README:
@@ -75,7 +73,7 @@ class TestOpenAIStandard(ChatModelIntegrationTests):
         return _invoke(llm, input_, stream)
 
     def invoke_with_reasoning_output(self, *, stream: bool = False) -> AIMessage:
-        llm = ChatOpenAI(model="o1-mini", stream_usage=True, temperature=1)
+        llm = ChatOpenAI(model="gpt-5-nano", reasoning_effort="medium")
         input_ = (
             "explain  the relationship between the 2008/9 economic crisis and the "
             "startup ecosystem in the early 2010s"
@@ -84,43 +82,7 @@ class TestOpenAIStandard(ChatModelIntegrationTests):
 
     @property
     def supports_pdf_inputs(self) -> bool:
-        # OpenAI requires a filename for PDF inputs
-        # For now, we test with filename in OpenAI-specific tests
-        return False
-
-    def test_openai_pdf_inputs(self, model: BaseChatModel) -> None:
-        """Test that the model can process PDF inputs."""
-        url = "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
-        pdf_data = base64.b64encode(httpx.get(url).content).decode("utf-8")
-
-        message = HumanMessage(
-            [
-                {"type": "text", "text": "Summarize this document:"},
-                {
-                    "type": "file",
-                    "source_type": "base64",
-                    "mime_type": "application/pdf",
-                    "data": pdf_data,
-                    "filename": "my-pdf",  # OpenAI requires a filename
-                },
-            ]
-        )
-        _ = model.invoke([message])
-
-        # Test OpenAI Chat Completions format
-        message = HumanMessage(
-            [
-                {"type": "text", "text": "Summarize this document:"},
-                {
-                    "type": "file",
-                    "file": {
-                        "filename": "test file.pdf",
-                        "file_data": f"data:application/pdf;base64,{pdf_data}",
-                    },
-                },
-            ]
-        )
-        _ = model.invoke([message])
+        return True
 
 
 def _invoke(llm: ChatOpenAI, input_: str, stream: bool) -> AIMessage:
@@ -129,11 +91,10 @@ def _invoke(llm: ChatOpenAI, input_: str, stream: bool) -> AIMessage:
         for chunk in llm.stream(input_):
             full = full + chunk if full else chunk  # type: ignore[operator]
         return cast(AIMessage, full)
-    else:
-        return cast(AIMessage, llm.invoke(input_))
+    return cast(AIMessage, llm.invoke(input_))
 
 
-@pytest.mark.skip()  # Test either finishes in 5 seconds or 5 minutes.
+@pytest.mark.skip  # Test either finishes in 5 seconds or 5 minutes.
 def test_audio_model() -> None:
     class AudioModelTests(ChatModelIntegrationTests):
         @property
@@ -143,7 +104,7 @@ def test_audio_model() -> None:
         @property
         def chat_model_params(self) -> dict:
             return {
-                "model": "gpt-4o-audio-preview",
+                "model": "gpt-audio",
                 "temperature": 0,
                 "model_kwargs": {
                     "modalities": ["text", "audio"],

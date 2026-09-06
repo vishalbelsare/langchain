@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 from functools import lru_cache
-from typing import Any, Optional
+from typing import Any
 
 import anthropic
 
@@ -22,10 +22,9 @@ class _SyncHttpxClientWrapper(anthropic.DefaultHttpxClient):
     """Borrowed from anthropic._base_client."""
 
     def __del__(self) -> None:
-        if self.is_closed:
-            return
-
         try:
+            if self.is_closed:
+                return
             self.close()
         except Exception:  # noqa: S110
             pass
@@ -35,10 +34,9 @@ class _AsyncHttpxClientWrapper(anthropic.DefaultAsyncHttpxClient):
     """Borrowed from anthropic._base_client."""
 
     def __del__(self) -> None:
-        if self.is_closed:
-            return
-
         try:
+            if self.is_closed:
+                return
             # TODO(someday): support non asyncio runtimes here
             asyncio.get_running_loop().create_task(self.aclose())
         except Exception:  # noqa: S110
@@ -48,9 +46,9 @@ class _AsyncHttpxClientWrapper(anthropic.DefaultAsyncHttpxClient):
 @lru_cache
 def _get_default_httpx_client(
     *,
-    base_url: Optional[str],
+    base_url: str | None,
     timeout: Any = _NOT_GIVEN,
-    anthropic_proxy: Optional[str] = None,
+    anthropic_proxy: str | None = None,
 ) -> _SyncHttpxClientWrapper:
     kwargs: dict[str, Any] = {
         "base_url": base_url
@@ -67,9 +65,9 @@ def _get_default_httpx_client(
 @lru_cache
 def _get_default_async_httpx_client(
     *,
-    base_url: Optional[str],
+    base_url: str | None,
     timeout: Any = _NOT_GIVEN,
-    anthropic_proxy: Optional[str] = None,
+    anthropic_proxy: str | None = None,
 ) -> _AsyncHttpxClientWrapper:
     kwargs: dict[str, Any] = {
         "base_url": base_url

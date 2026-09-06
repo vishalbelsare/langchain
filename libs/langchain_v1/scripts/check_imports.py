@@ -1,4 +1,6 @@
-"""Quickly verify that a list of Python files can be loaded by the Python interpreter
+"""Check imports script.
+
+Quickly verify that a list of Python files can be loaded by the Python interpreter
 without raising any errors. Ran before running more expensive tests. Useful in
 Makefiles.
 
@@ -24,8 +26,8 @@ if __name__ == "__main__":
             SourceFileLoader(module_name, file).load_module()
         except Exception:
             has_failure = True
-            print(file)  # noqa: T201
+            print(file)
             traceback.print_exc()
-            print()  # noqa: T201
+            print()
 
     sys.exit(1 if has_failure else 0)

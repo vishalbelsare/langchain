@@ -35,7 +35,6 @@ def test_custom_tool() -> None:
     @custom_tool(format={"type": "grammar", "syntax": "lark", "definition": "..."})
     def another_tool(x: str) -> None:
         """Do thing."""
-        pass
 
     llm = ChatOpenAI(
         model="gpt-4.1", use_responses_api=True, output_version="responses/v1"
@@ -84,7 +83,7 @@ def test_custom_tool() -> None:
     ]
     payload = llm._get_request_payload(message_history)  # type: ignore[attr-defined]
     expected_input = [
-        {"content": "Use the tool", "role": "user"},
+        {"content": "Use the tool", "role": "user", "type": "message"},
         {
             "type": "custom_tool_call",
             "id": "ctc_abc123",

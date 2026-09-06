@@ -9,10 +9,12 @@ from langchain_groq import ChatGroq
 
 
 class TestGroqStandard(ChatModelUnitTests):
+    """Run ChatGroq on LangChain standard tests."""
+
     @property
     def chat_model_class(self) -> type[BaseChatModel]:
         return ChatGroq
 
     @property
     def chat_model_params(self) -> dict:
-        return {"model": "llama-3.1-8b-instant"}
+        return {"model": "openai/gpt-oss-20b"}

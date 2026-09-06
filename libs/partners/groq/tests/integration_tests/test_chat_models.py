@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 import pytest
 from groq import BadRequestError
@@ -25,9 +25,11 @@ from tests.unit_tests.fake.callbacks import (
 )
 
 DEFAULT_MODEL_NAME = "openai/gpt-oss-20b"
+TOOL_CALLING_MODEL_NAME = "qwen/qwen3.6-27b"
+TOOL_CALLING_MODEL_KWARGS: dict[str, Any] = {"reasoning_effort": "none"}
 
-# gpt-oss doesn't support `reasoning_effort`
-REASONING_MODEL_NAME = "deepseek-r1-distill-llama-70b"
+# GPT-OSS models don't support `reasoning_format`
+REASONING_MODEL_NAME = "qwen/qwen3.6-27b"
 
 
 #
@@ -102,7 +104,7 @@ async def test_astream() -> None:
     """Test streaming tokens from Groq."""
     chat = ChatGroq(model=DEFAULT_MODEL_NAME, max_tokens=10)
 
-    full: Optional[BaseMessageChunk] = None
+    full: BaseMessageChunk | None = None
     chunks_with_token_counts = 0
     chunks_with_response_metadata = 0
     async for token in chat.astream("Welcome to the Groqetship!"):
@@ -111,7 +113,9 @@ async def test_astream() -> None:
         full = token if full is None else full + token
         if token.usage_metadata is not None:
             chunks_with_token_counts += 1
-        if token.response_metadata:
+        if token.response_metadata and not set(token.response_metadata.keys()).issubset(
+            {"model_provider", "output_version"}
+        ):
             chunks_with_response_metadata += 1
     if chunks_with_token_counts != 1 or chunks_with_response_metadata != 1:
         msg = (
@@ -254,7 +258,7 @@ def test_reasoning_output_stream() -> None:
         HumanMessage(content="I love programming."),
     ]
 
-    full_response: Optional[AIMessageChunk] = None
+    full_response: AIMessageChunk | None = None
     for token in chat.stream(message):
         assert isinstance(token, AIMessageChunk)
 
@@ -262,7 +266,7 @@ def test_reasoning_output_stream() -> None:
             full_response = token
         else:
             # Casting since adding results in a type error
-            full_response = cast(AIMessageChunk, full_response + token)
+            full_response = cast("AIMessageChunk", full_response + token)
 
     assert full_response is not None
     assert isinstance(full_response, AIMessageChunk)
@@ -274,14 +278,15 @@ def test_reasoning_output_stream() -> None:
 def test_reasoning_effort_none() -> None:
     """Test that no reasoning output is returned if effort is set to none."""
     chat = ChatGroq(
-        model="qwen/qwen3-32b",  # Only qwen3 currently supports reasoning_effort = none
+        model=REASONING_MODEL_NAME,
         reasoning_effort="none",
     )
     message = HumanMessage(content="What is the capital of France?")
     response = chat.invoke([message])
     assert isinstance(response, AIMessage)
     assert "reasoning_content" not in response.additional_kwargs
-    assert "<think>" not in response.content and "<think/>" not in response.content
+    assert "<think>" not in response.content
+    assert "<think/>" not in response.content
 
 
 @pytest.mark.parametrize("effort", ["low", "medium", "high"])
@@ -376,14 +381,16 @@ def test_streaming_generation_info() -> None:
 
     callback = _FakeCallback()
     chat = ChatGroq(
-        model="llama-3.1-8b-instant",  # Use a model that properly streams content
+        # Non-reasoning model so the first tokens are plain content
+        model="qwen/qwen3.6-27b",
+        reasoning_effort="none",
         max_tokens=2,
         temperature=0,
         callbacks=[callback],
     )
     list(chat.stream("Respond with the single word Hello", stop=["o"]))
     generation = callback.saved_things["generation"]
-    # `Hello!` is two tokens, assert that that is what is returned
+    # `Hello!` is two tokens, assert that is what is returned
     assert isinstance(generation, LLMResult)
     assert generation.generations[0][0].text == "Hell"
 
@@ -400,7 +407,7 @@ def test_system_message() -> None:
 
 def test_tool_choice() -> None:
     """Test that tool choice is respected."""
-    llm = ChatGroq(model=DEFAULT_MODEL_NAME)
+    llm = ChatGroq(model=TOOL_CALLING_MODEL_NAME, **TOOL_CALLING_MODEL_KWARGS)
 
     class MyTool(BaseModel):
         name: str
@@ -430,7 +437,7 @@ def test_tool_choice() -> None:
 
 def test_tool_choice_bool() -> None:
     """Test that tool choice is respected just passing in True."""
-    llm = ChatGroq(model=DEFAULT_MODEL_NAME)
+    llm = ChatGroq(model=TOOL_CALLING_MODEL_NAME, **TOOL_CALLING_MODEL_KWARGS)
 
     class MyTool(BaseModel):
         name: str
@@ -452,10 +459,9 @@ def test_tool_choice_bool() -> None:
     assert tool_call["type"] == "function"
 
 
-@pytest.mark.xfail(reason="Groq tool_choice doesn't currently force a tool call")
 def test_streaming_tool_call() -> None:
     """Test that tool choice is respected."""
-    llm = ChatGroq(model=DEFAULT_MODEL_NAME)
+    llm = ChatGroq(model=TOOL_CALLING_MODEL_NAME, **TOOL_CALLING_MODEL_KWARGS)
 
     class MyTool(BaseModel):
         name: str
@@ -463,37 +469,32 @@ def test_streaming_tool_call() -> None:
 
     with_tool = llm.bind_tools([MyTool], tool_choice="MyTool")
 
-    resp = with_tool.stream("Who was the 27 year old named Erick?")
-    additional_kwargs = None
+    resp = with_tool.stream("Who was the 27 year old named Erick? Use the tool.")
+    full: AIMessageChunk | None = None
     for chunk in resp:
         assert isinstance(chunk, AIMessageChunk)
-        assert chunk.content == ""  # should just be tool call
-        additional_kwargs = chunk.additional_kwargs
+        full = chunk if full is None else full + chunk
 
-    assert additional_kwargs is not None
-    tool_calls = additional_kwargs["tool_calls"]
-    assert len(tool_calls) == 1
-    tool_call = tool_calls[0]
-    assert tool_call["function"]["name"] == "MyTool"
-    assert json.loads(tool_call["function"]["arguments"]) == {
-        "age": 27,
-        "name": "Erick",
-    }
-    assert tool_call["type"] == "function"
+    assert full is not None
+    assert full.content == ""  # should just be tool call
+    assert len(full.tool_calls) == 1
+    tool_call = full.tool_calls[0]
+    assert tool_call["name"] == "MyTool"
+    assert tool_call["args"] == {"name": "Erick", "age": 27}
+    assert tool_call["id"] is not None
 
-    assert isinstance(chunk, AIMessageChunk)
-    assert isinstance(chunk.tool_call_chunks, list)
-    assert len(chunk.tool_call_chunks) == 1
-    tool_call_chunk = chunk.tool_call_chunks[0]
+    assert isinstance(full.tool_call_chunks, list)
+    assert len(full.tool_call_chunks) == 1
+    tool_call_chunk = full.tool_call_chunks[0]
     assert tool_call_chunk["name"] == "MyTool"
+    assert tool_call_chunk["id"] == tool_call["id"]
     assert isinstance(tool_call_chunk["args"], str)
     assert json.loads(tool_call_chunk["args"]) == {"name": "Erick", "age": 27}
 
 
-@pytest.mark.xfail(reason="Groq tool_choice doesn't currently force a tool call")
 async def test_astreaming_tool_call() -> None:
     """Test that tool choice is respected."""
-    llm = ChatGroq(model=DEFAULT_MODEL_NAME)
+    llm = ChatGroq(model=TOOL_CALLING_MODEL_NAME, **TOOL_CALLING_MODEL_KWARGS)
 
     class MyTool(BaseModel):
         name: str
@@ -501,29 +502,25 @@ async def test_astreaming_tool_call() -> None:
 
     with_tool = llm.bind_tools([MyTool], tool_choice="MyTool")
 
-    resp = with_tool.astream("Who was the 27 year old named Erick?")
-    additional_kwargs = None
+    resp = with_tool.astream("Who was the 27 year old named Erick? Use the tool.")
+    full: AIMessageChunk | None = None
     async for chunk in resp:
         assert isinstance(chunk, AIMessageChunk)
-        assert chunk.content == ""  # should just be tool call
-        additional_kwargs = chunk.additional_kwargs
+        full = chunk if full is None else full + chunk
 
-    assert additional_kwargs is not None
-    tool_calls = additional_kwargs["tool_calls"]
-    assert len(tool_calls) == 1
-    tool_call = tool_calls[0]
-    assert tool_call["function"]["name"] == "MyTool"
-    assert json.loads(tool_call["function"]["arguments"]) == {
-        "age": 27,
-        "name": "Erick",
-    }
-    assert tool_call["type"] == "function"
+    assert full is not None
+    assert full.content == ""  # should just be tool call
+    assert len(full.tool_calls) == 1
+    tool_call = full.tool_calls[0]
+    assert tool_call["name"] == "MyTool"
+    assert tool_call["args"] == {"name": "Erick", "age": 27}
+    assert tool_call["id"] is not None
 
-    assert isinstance(chunk, AIMessageChunk)
-    assert isinstance(chunk.tool_call_chunks, list)
-    assert len(chunk.tool_call_chunks) == 1
-    tool_call_chunk = chunk.tool_call_chunks[0]
+    assert isinstance(full.tool_call_chunks, list)
+    assert len(full.tool_call_chunks) == 1
+    tool_call_chunk = full.tool_call_chunks[0]
     assert tool_call_chunk["name"] == "MyTool"
+    assert tool_call_chunk["id"] == tool_call["id"]
     assert isinstance(tool_call_chunk["args"], str)
     assert json.loads(tool_call_chunk["args"]) == {"name": "Erick", "age": 27}
 
@@ -570,6 +567,9 @@ def test_setting_service_tier_class() -> None:
     assert chat.service_tier == "on_demand"
     response = chat.invoke([message])
     assert response.response_metadata.get("service_tier") == "on_demand"
+
+    chat = ChatGroq(model=DEFAULT_MODEL_NAME, service_tier="performance")
+    assert chat.service_tier == "performance"
 
     chat = ChatGroq(model=DEFAULT_MODEL_NAME)
     assert chat.service_tier == "on_demand"
@@ -645,7 +645,15 @@ def test_setting_service_tier_streaming() -> None:
     chat = ChatGroq(model=DEFAULT_MODEL_NAME, service_tier="flex")
     chunks = list(chat.stream("Why is the sky blue?", service_tier="auto"))
 
-    assert chunks[-1].response_metadata.get("service_tier") == "auto"
+    # Find the final chunk with finish_reason
+    final_chunk = None
+    for chunk in chunks:
+        if chunk.response_metadata.get("finish_reason"):
+            final_chunk = chunk
+            break
+
+    assert final_chunk is not None
+    assert final_chunk.response_metadata.get("service_tier") == "auto"
 
 
 async def test_setting_service_tier_request_async() -> None:
@@ -654,6 +662,146 @@ async def test_setting_service_tier_request_async() -> None:
     response = await chat.ainvoke("Hello!", service_tier="on_demand")
 
     assert response.response_metadata.get("service_tier") == "on_demand"
+
+
+@pytest.mark.vcr
+def test_web_search() -> None:
+    llm = ChatGroq(model="groq/compound")
+    input_message = {
+        "role": "user",
+        "content": "Search for the weather in Boston today.",
+    }
+    full: AIMessageChunk | None = None
+    for chunk in llm.stream([input_message]):
+        full = chunk if full is None else full + chunk
+    assert isinstance(full, AIMessageChunk)
+    assert full.additional_kwargs["reasoning_content"]
+    assert full.additional_kwargs["executed_tools"]
+    assert [block["type"] for block in full.content_blocks] == [
+        "reasoning",
+        "server_tool_call",
+        "server_tool_result",
+        "text",
+    ]
+
+    next_message = {
+        "role": "user",
+        "content": "Now search for the weather in San Francisco.",
+    }
+    response = llm.invoke([input_message, full, next_message])
+    assert [block["type"] for block in response.content_blocks] == [
+        "reasoning",
+        "server_tool_call",
+        "server_tool_result",
+        "text",
+    ]
+
+
+@pytest.mark.default_cassette("test_web_search.yaml.gz")
+@pytest.mark.vcr
+def test_web_search_v1() -> None:
+    llm = ChatGroq(model="groq/compound", output_version="v1")
+    input_message = {
+        "role": "user",
+        "content": "Search for the weather in Boston today.",
+    }
+    full: AIMessageChunk | None = None
+    for chunk in llm.stream([input_message]):
+        full = chunk if full is None else full + chunk
+    assert isinstance(full, AIMessageChunk)
+    assert full.additional_kwargs["reasoning_content"]
+    assert full.additional_kwargs["executed_tools"]
+    assert [block["type"] for block in full.content_blocks] == [
+        "reasoning",
+        "server_tool_call",
+        "server_tool_result",
+        "reasoning",
+        "text",
+    ]
+
+    next_message = {
+        "role": "user",
+        "content": "Now search for the weather in San Francisco.",
+    }
+    response = llm.invoke([input_message, full, next_message])
+    assert [block["type"] for block in response.content_blocks] == [
+        "reasoning",
+        "server_tool_call",
+        "server_tool_result",
+        "text",
+    ]
+
+
+@pytest.mark.vcr
+def test_code_interpreter() -> None:
+    llm = ChatGroq(model="groq/compound-mini")
+    input_message = {
+        "role": "user",
+        "content": (
+            "Calculate the square root of 101 and show me the Python code you used."
+        ),
+    }
+    full: AIMessageChunk | None = None
+    for chunk in llm.stream([input_message]):
+        full = chunk if full is None else full + chunk
+    assert isinstance(full, AIMessageChunk)
+    assert full.additional_kwargs["reasoning_content"]
+    assert full.additional_kwargs["executed_tools"]
+    assert [block["type"] for block in full.content_blocks] == [
+        "reasoning",
+        "server_tool_call",
+        "server_tool_result",
+        "text",
+    ]
+
+    next_message = {
+        "role": "user",
+        "content": "Now do the same for 102.",
+    }
+    response = llm.invoke([input_message, full, next_message])
+    assert [block["type"] for block in response.content_blocks] == [
+        "reasoning",
+        "server_tool_call",
+        "server_tool_result",
+        "text",
+    ]
+
+
+@pytest.mark.default_cassette("test_code_interpreter.yaml.gz")
+@pytest.mark.vcr
+def test_code_interpreter_v1() -> None:
+    llm = ChatGroq(model="groq/compound-mini", output_version="v1")
+    input_message = {
+        "role": "user",
+        "content": (
+            "Calculate the square root of 101 and show me the Python code you used."
+        ),
+    }
+    full: AIMessageChunk | None = None
+    for chunk in llm.stream([input_message]):
+        full = chunk if full is None else full + chunk
+    assert isinstance(full, AIMessageChunk)
+    assert full.additional_kwargs["reasoning_content"]
+    assert full.additional_kwargs["executed_tools"]
+    assert [block["type"] for block in full.content_blocks] == [
+        "reasoning",
+        "server_tool_call",
+        "server_tool_result",
+        "reasoning",
+        "text",
+    ]
+
+    next_message = {
+        "role": "user",
+        "content": "Now do the same for 102.",
+    }
+    response = llm.invoke([input_message, full, next_message])
+    assert [block["type"] for block in response.content_blocks] == [
+        "reasoning",
+        "server_tool_call",
+        "server_tool_result",
+        "text",
+    ]
 
 
 # Groq does not currently support N > 1

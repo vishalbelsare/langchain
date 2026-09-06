@@ -1,11 +1,13 @@
 """Standard LangChain interface tests."""
 
+import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_tests.integration_tests import (  # type: ignore[import-not-found]
     ChatModelIntegrationTests,  # type: ignore[import-not-found]
 )
 
 from langchain_mistralai import ChatMistralAI
+from tests.integration_tests._rate_limiter import rate_limiter
 
 
 class TestMistralStandard(ChatModelIntegrationTests):
@@ -15,8 +17,16 @@ class TestMistralStandard(ChatModelIntegrationTests):
 
     @property
     def chat_model_params(self) -> dict:
-        return {"model": "mistral-large-latest", "temperature": 0}
+        return {
+            "model": "mistral-large-latest",
+            "temperature": 0,
+            "rate_limiter": rate_limiter,
+        }
 
     @property
     def supports_json_mode(self) -> bool:
         return True
+
+    @pytest.mark.xfail(reason=("MistralAI inconsistently fails to return valid fields"))
+    def test_structured_output_pydantic_2_v1(self, model: BaseChatModel) -> None:
+        super().test_structured_output_pydantic_2_v1(model)

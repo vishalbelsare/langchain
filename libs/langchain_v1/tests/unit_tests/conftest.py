@@ -1,42 +1,77 @@
 """Configuration for unit tests."""
 
+import json
 from collections.abc import Iterator, Sequence
 from importlib import util
+from typing import Any
 
 import pytest
-from blockbuster import blockbuster_ctx
+from blockbuster import BlockBuster, blockbuster_ctx
+from langchain_tests.conftest import CustomPersister, CustomSerializer, base_vcr_config
+from vcr import VCR
+
+_EXTRA_HEADERS = [
+    ("openai-organization", "PLACEHOLDER"),
+    ("user-agent", "PLACEHOLDER"),
+    ("x-openai-client-user-agent", "PLACEHOLDER"),
+]
 
 
 @pytest.fixture(autouse=True)
-def blockbuster() -> Iterator[None]:
-    with blockbuster_ctx("langchain") as bb:
-        bb.functions["io.TextIOWrapper.read"].can_block_in(
-            "langchain/__init__.py",
-            "<module>",
-        )
+def blockbuster() -> Iterator[BlockBuster]:
+    with blockbuster_ctx() as bb:
+        yield bb
 
-        for func in ["os.stat", "os.path.abspath"]:
-            (
-                bb.functions[func]
-                .can_block_in("langchain_core/runnables/base.py", "__repr__")
-                .can_block_in(
-                    "langchain_core/beta/runnables/context.py",
-                    "aconfig_with_context",
-                )
-            )
 
-        for func in ["os.stat", "io.TextIOWrapper.read"]:
-            bb.functions[func].can_block_in(
-                "langsmith/client.py",
-                "_default_retry_config",
-            )
+def remove_request_headers(request: Any) -> Any:
+    """Remove sensitive headers from the request."""
+    for k in request.headers:
+        request.headers[k] = "**REDACTED**"
+    request.uri = "**REDACTED**"
+    return request
 
-        for bb_function in bb.functions.values():
-            bb_function.can_block_in(
-                "freezegun/api.py",
-                "_get_cached_module_attributes",
-            )
-        yield
+
+def remove_response_headers(response: dict[str, Any]) -> dict[str, Any]:
+    """Remove sensitive headers from the response."""
+    for k in response["headers"]:
+        response["headers"][k] = "**REDACTED**"
+    return response
+
+
+@pytest.fixture(scope="session")
+def vcr_config() -> dict[str, Any]:
+    """Extend the default configuration coming from langchain_tests."""
+    config = base_vcr_config()
+    config["match_on"] = [m if m != "body" else "json_body" for m in config.get("match_on", [])]
+    config.setdefault("filter_headers", []).extend(_EXTRA_HEADERS)
+    config["before_record_request"] = remove_request_headers
+    config["before_record_response"] = remove_response_headers
+    config["serializer"] = "yaml.gz"
+    config["path_transformer"] = VCR.ensure_suffix(".yaml.gz")
+    return config
+
+
+def _json_body_matcher(r1: Any, r2: Any) -> None:
+    """Match request bodies as parsed JSON, ignoring key order."""
+    b1 = r1.body or b""
+    b2 = r2.body or b""
+    if isinstance(b1, bytes):
+        b1 = b1.decode("utf-8")
+    if isinstance(b2, bytes):
+        b2 = b2.decode("utf-8")
+    try:
+        j1 = json.loads(b1)
+        j2 = json.loads(b2)
+    except (json.JSONDecodeError, ValueError):
+        assert b1 == b2, f"body mismatch (non-JSON):\n{b1}\n!=\n{b2}"
+        return
+    assert j1 == j2, f"body mismatch:\n{j1}\n!=\n{j2}"
+
+
+def pytest_recording_configure(config: dict[str, Any], vcr: VCR) -> None:  # noqa: ARG001
+    vcr.register_persister(CustomPersister())
+    vcr.register_serializer("yaml.gz", CustomSerializer())
+    vcr.register_matcher("json_body", _json_body_matcher)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -63,19 +98,17 @@ def pytest_collection_modifyitems(config: pytest.Config, items: Sequence[pytest.
 
     The `requires` marker syntax is:
 
-    .. code-block:: python
-
-        @pytest.mark.requires("package1", "package2")
-        def test_something():
-            ...
-
+    ```python
+    @pytest.mark.requires("package1", "package2")
+    def test_something(): ...
+    ```
     """
     # Mapping from the name of a package to whether it is installed or not.
     # Used to avoid repeated calls to `util.find_spec`
     required_pkgs_info: dict[str, bool] = {}
 
-    only_extended = config.getoption("--only-extended") or False
-    only_core = config.getoption("--only-core") or False
+    only_extended = config.getoption("--only-extended", default=False)
+    only_core = config.getoption("--only-core", default=False)
 
     if only_extended and only_core:
         msg = "Cannot specify both `--only-extended` and `--only-core`."

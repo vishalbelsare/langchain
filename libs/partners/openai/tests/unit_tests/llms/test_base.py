@@ -1,12 +1,10 @@
-import os
-
 import pytest
 from langchain_core.outputs import GenerationChunk
 
 from langchain_openai import OpenAI
 from langchain_openai.llms.base import _stream_response_to_generation_chunk
 
-os.environ["OPENAI_API_KEY"] = "foo"
+OPENAI_LLM_TEST_MODEL = "gpt-3.5-turbo-instruct"
 
 
 def test_openai_model_param() -> None:
@@ -24,6 +22,9 @@ def test_openai_model_param() -> None:
         "ls_temperature": 0.7,
         "ls_max_tokens": 256,
     }
+
+    ls_params = llm._get_ls_params(model="bar")
+    assert ls_params["ls_model_name"] == "bar"
 
 
 def test_openai_model_kwargs() -> None:
@@ -59,10 +60,9 @@ def mock_completion() -> dict:
     }
 
 
-@pytest.mark.parametrize("model", ["gpt-3.5-turbo-instruct"])
+@pytest.mark.parametrize("model", [OPENAI_LLM_TEST_MODEL])
 def test_get_token_ids(model: str) -> None:
     OpenAI(model=model).get_token_ids("foo")
-    return
 
 
 def test_custom_token_counting() -> None:
@@ -106,3 +106,13 @@ def test_stream_response_to_generation_chunk() -> None:
     assert chunk == GenerationChunk(
         text="", generation_info={"finish_reason": None, "logprobs": None}
     )
+
+
+def test_generate_streaming_multiple_prompts_error() -> None:
+    """Ensures ValueError when streaming=True and multiple prompts."""
+    llm = OpenAI(streaming=True)
+
+    with pytest.raises(
+        ValueError, match="Cannot stream results with multiple prompts\\."
+    ):
+        llm._generate(["foo", "bar"])

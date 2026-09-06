@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import requests
 from aiohttp import ClientSession, ClientTimeout
@@ -15,8 +15,9 @@ from langchain_core.language_models.llms import LLM
 from langchain_core.utils import get_pydantic_field_names
 from langchain_core.utils.utils import _build_model_kwargs, secret_from_env
 from pydantic import ConfigDict, Field, SecretStr, model_validator
+from typing_extensions import Self
 
-from langchain_fireworks.version import __version__
+from langchain_fireworks._version import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -24,17 +25,16 @@ logger = logging.getLogger(__name__)
 class Fireworks(LLM):
     """LLM models from `Fireworks`.
 
-    To use, you'll need an `API key <https://fireworks.ai>`__. This can be passed in as
-    init param ``fireworks_api_key`` or set as environment variable
-    ``FIREWORKS_API_KEY``.
+    To use, you'll need an [API key](https://fireworks.ai). This can be passed in as
+    init param `fireworks_api_key` or set as environment variable
+    `FIREWORKS_API_KEY`.
 
-    `Fireworks AI API reference <https://readme.fireworks.ai/>`__
+    [Fireworks AI API reference](https://readme.fireworks.ai/)
 
     Example:
-
-        .. code-block:: python
-            response = fireworks.generate(["Tell me a joke."])
-
+        ```python
+        response = fireworks.generate(["Tell me a joke."])
+        ```
     """
 
     base_url: str = "https://api.fireworks.ai/inference/v1/completions"
@@ -52,39 +52,39 @@ class Fireworks(LLM):
     )
     """Fireworks API key.
 
-    Automatically read from env variable ``FIREWORKS_API_KEY`` if not provided.
+    Automatically read from env variable `FIREWORKS_API_KEY` if not provided.
     """
     model: str
-    """Model name. `(Available models) <https://readme.fireworks.ai/>`__"""
-    temperature: Optional[float] = None
+    """Model name. [(Available models)](https://readme.fireworks.ai/)"""
+    temperature: float | None = None
     """Model temperature."""
-    top_p: Optional[float] = None
+    top_p: float | None = None
     """Used to dynamically adjust the number of choices for each predicted token based
-    on the cumulative probabilities. A value of ``1`` will always yield the same output.
-    A temperature less than ``1`` favors more correctness and is appropriate for
-    question answering or summarization. A value greater than ``1`` introduces more
+    on the cumulative probabilities. A value of `1` will always yield the same output.
+    A temperature less than `1` favors more correctness and is appropriate for
+    question answering or summarization. A value greater than `1` introduces more
     randomness in the output.
     """
     model_kwargs: dict[str, Any] = Field(default_factory=dict)
-    """Holds any model parameters valid for ``create`` call not explicitly specified."""
-    top_k: Optional[int] = None
+    """Holds any model parameters valid for `create` call not explicitly specified."""
+    top_k: int | None = None
     """Used to limit the number of choices for the next predicted word or token. It
     specifies the maximum number of tokens to consider at each step, based on their
     probability of occurrence. This technique helps to speed up the generation process
     and can improve the quality of the generated text by focusing on the most likely
     options.
     """
-    max_tokens: Optional[int] = None
+    max_tokens: int | None = None
     """The maximum number of tokens to generate."""
-    repetition_penalty: Optional[float] = None
+    repetition_penalty: float | None = None
     """A number that controls the diversity of generated text by reducing the likelihood
     of repeated sequences. Higher values decrease repetition.
     """
-    logprobs: Optional[int] = None
+    logprobs: int | None = None
     """An integer that specifies how many top token log probabilities are included in
     the response for each token generation step.
     """
-    timeout: Optional[int] = 30
+    timeout: int | None = 30
     """Timeout in seconds for requests to the Fireworks API."""
 
     model_config = ConfigDict(
@@ -98,6 +98,12 @@ class Fireworks(LLM):
         """Build extra kwargs from additional params that were passed in."""
         all_required_field_names = get_pydantic_field_names(cls)
         return _build_model_kwargs(values, all_required_field_names)
+
+    @model_validator(mode="after")
+    def _set_fireworks_version(self) -> Self:
+        """Set package version in metadata."""
+        self._add_version("langchain-fireworks", __version__)
+        return self
 
     @property
     def _llm_type(self) -> str:
@@ -125,8 +131,8 @@ class Fireworks(LLM):
     def _call(
         self,
         prompt: str,
-        stop: Optional[list[str]] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> str:
         """Call out to Fireworks's text generation endpoint.
@@ -178,8 +184,8 @@ class Fireworks(LLM):
     async def _acall(
         self,
         prompt: str,
-        stop: Optional[list[str]] = None,
-        run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> str:
         """Call Fireworks model to get predictions based on the prompt.

@@ -1,13 +1,7 @@
-from importlib import metadata
+"""LangChain DeepSeek integration."""
 
+from langchain_deepseek._version import __version__
 from langchain_deepseek.chat_models import ChatDeepSeek
-
-try:
-    __version__ = metadata.version(__package__)
-except metadata.PackageNotFoundError:
-    # Case where package metadata is not available.
-    __version__ = ""
-del metadata  # optional, avoids polluting the results of dir(__package__)
 
 __all__ = [
     "ChatDeepSeek",

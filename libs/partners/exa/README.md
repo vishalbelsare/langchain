@@ -1,105 +1,27 @@
 # langchain-exa
 
-This package contains the LangChain integrations for Exa Cloud generative models.
+[![PyPI - Version](https://img.shields.io/pypi/v/langchain-exa?label=%20)](https://pypi.org/project/langchain-exa/#history)
+[![PyPI - License](https://img.shields.io/pypi/l/langchain-exa)](https://opensource.org/licenses/MIT)
+[![PyPI - Downloads](https://img.shields.io/pepy/dt/langchain-exa)](https://pypistats.org/packages/langchain-exa)
+[![Twitter](https://img.shields.io/twitter/url/https/twitter.com/langchain_oss.svg?style=social&label=Follow%20%40LangChain)](https://x.com/langchain_oss)
 
-## Installation
+Looking for the JS/TS version? Check out [LangChain.js](https://github.com/langchain-ai/langchainjs).
+
+## Quick Install
 
 ```bash
-pip install -U langchain-exa
+uv add langchain-exa
 ```
 
-## Exa Search Retriever
+## 🤔 What is this?
 
-You can retrieve search results as follows
+This package contains the LangChain integration with [Exa](https://exa.ai), a web search API built for AI. It lets you search the web and get clean, ready-to-use content from any page.
 
-```python
-from langchain_exa import ExaSearchRetriever
+## 📖 Documentation
 
-exa_api_key = "YOUR API KEY"
+View the [documentation](https://docs.langchain.com/oss/python/integrations/providers/exa_search) for more details.
 
-# Create a new instance of the ExaSearchRetriever
-exa = ExaSearchRetriever(exa_api_key=exa_api_key)
+## Resources
 
-# Search for a query and save the results
-results  = exa.invoke("What is the capital of France?")
-
-# Print the results
-print(results)
-```
-
-### Advanced Features
-
-You can use advanced features like text limits, summaries, and live crawling:
-
-```python
-from langchain_exa import ExaSearchRetriever, TextContentsOptions
-
-# Create a new instance with advanced options
-exa = ExaSearchRetriever(
-    exa_api_key="YOUR API KEY",
-    k=20,  # Number of results (1-100)
-    type="auto",  # Can be "neural", "keyword", or "auto"
-    livecrawl="always",  # Can be "always", "fallback", or "never"
-    summary=True,  # Get an AI-generated summary of each result
-    text_contents_options={"max_characters": 3000}  # Limit text length
-)
-
-# Search for a query with custom summary prompt
-exa_with_custom_summary = ExaSearchRetriever(
-    exa_api_key="YOUR API KEY",
-    summary={"query": "generate one line summary in simple words."}  # Custom summary prompt
-)
-```
-
-## Exa Search Results
-
-You can run the ExaSearchResults module as follows
-
-```python
-from langchain_exa import ExaSearchResults
-
-# Initialize the ExaSearchResults tool
-search_tool = ExaSearchResults(exa_api_key="YOUR API KEY")
-
-# Perform a search query
-search_results = search_tool._run(
-    query="When was the last time the New York Knicks won the NBA Championship?",
-    num_results=5,
-    text_contents_options=True,
-    highlights=True
-)
-
-print("Search Results:", search_results)
-```
-
-## Exa Find Similar Results
-
-You can run the ExaFindSimilarResults module as follows
-
-```python
-from langchain_exa import ExaFindSimilarResults
-
-# Initialize the ExaFindSimilarResults tool
-find_similar_tool = ExaFindSimilarResults(exa_api_key="YOUR API KEY")
-
-# Find similar results based on a URL
-similar_results = find_similar_tool._run(
-    url="http://espn.com",
-    num_results=5,
-    text_contents_options=True,
-    highlights=True
-)
-
-print("Similar Results:", similar_results)
-```
-
-## Configuration Options
-
-All Exa tools support the following common parameters:
-
-- `num_results` (1-100): Number of search results to return
-- `type`: Search type - "neural", "keyword", or "auto"
-- `livecrawl`: Live crawling mode - "always", "fallback", or "never"
-- `summary`: Get AI-generated summaries (True/False or custom prompt dict)
-- `text_contents_options`: Dict to limit text length (e.g. `{"max_characters": 2000}`)
-- `highlights`: Include highlighted text snippets (True/False)
+- [LangChain Academy](https://academy.langchain.com/) — comprehensive, free courses on LangChain libraries and products, made by the LangChain team
+- [Code of Conduct](https://github.com/langchain-ai/langchain/?tab=coc-ov-file) — community guidelines and standards

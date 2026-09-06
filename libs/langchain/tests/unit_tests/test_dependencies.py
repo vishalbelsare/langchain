@@ -52,17 +52,13 @@ def test_test_group_dependencies(uv_conf: Mapping[str, Any]) -> None:
 
     Examples of dependencies that should NOT be included: boto3, azure, postgres, etc.
     """
-
     dependencies = uv_conf["dependency-groups"]["test"]
     test_group_deps = {Requirement(dep).name for dep in dependencies}
 
     assert sorted(test_group_deps) == sorted(
         [
-            "duckdb-engine",
             "freezegun",
-            "langchain-core",
             "langchain-tests",
-            "langchain-text-splitters",
             "langchain-openai",
             "lark",
             "packaging",
@@ -75,13 +71,10 @@ def test_test_group_dependencies(uv_conf: Mapping[str, Any]) -> None:
             "pytest-socket",
             "pytest-watcher",
             "pytest-xdist",
-            "blockbuster",
             "responses",
             "syrupy",
             "toml",
             "requests-mock",
-            # TODO: temporary hack since cffi 1.17.1 doesn't work with py 3.9.
-            "cffi",
             "numpy",
         ],
     )

@@ -17,9 +17,6 @@ def blockbuster() -> Iterator[BlockBuster]:
                 bb.functions[func]
                 .can_block_in("langchain_core/_api/internal.py", "is_caller_internal")
                 .can_block_in("langchain_core/runnables/base.py", "__repr__")
-                .can_block_in(
-                    "langchain_core/beta/runnables/context.py", "aconfig_with_context"
-                )
             )
 
         for func in ["os.stat", "io.TextIOWrapper.read"]:
@@ -61,12 +58,10 @@ def pytest_collection_modifyitems(
 
     The `requires` marker syntax is:
 
-    .. code-block:: python
-
-        @pytest.mark.requires("package1", "package2")
-        def test_something():
-            ...
-
+    ```python
+    @pytest.mark.requires("package1", "package2")
+    def test_something(): ...
+    ```
     """
     # Mapping from the name of a package to whether it is installed or not.
     # Used to avoid repeated calls to `util.find_spec`

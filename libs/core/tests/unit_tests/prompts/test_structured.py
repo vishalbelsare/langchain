@@ -1,35 +1,36 @@
 from functools import partial
 from inspect import isclass
-from typing import Any, Union, cast
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel
+from typing_extensions import override
 
-from langchain_core.language_models import FakeListChatModel
+from langchain_core.language_models import FakeListChatModel, LanguageModelInput
 from langchain_core.load.dump import dumps
 from langchain_core.load.load import loads
 from langchain_core.messages import HumanMessage
 from langchain_core.prompts.structured import StructuredPrompt
 from langchain_core.runnables.base import Runnable, RunnableLambda
 from langchain_core.utils.mustache import ChevronError
-from langchain_core.utils.pydantic import is_basemodel_subclass
 
 
 def _fake_runnable(
-    _: Any, *, schema: Union[dict, type[BaseModel]], value: Any = 42, **_kwargs: Any
-) -> Union[BaseModel, dict]:
-    if isclass(schema) and is_basemodel_subclass(schema):
+    _: Any, *, schema: dict[str, Any] | type[BaseModel], value: Any = 42, **_kwargs: Any
+) -> BaseModel | dict[str, Any]:
+    if isclass(schema) and issubclass(schema, BaseModel):
         return schema(name="yo", value=value)
-    params = cast("dict", schema)["parameters"]
-    return {k: 1 if k != "value" else value for k, v in params.items()}
+    params = cast("dict[str, Any]", schema)["parameters"]
+    return {k: 1 if k != "value" else value for k in params}
 
 
 class FakeStructuredChatModel(FakeListChatModel):
-    """Fake ChatModel for testing purposes."""
+    """Fake chat model for testing purposes."""
 
+    @override
     def with_structured_output(
-        self, schema: Union[dict, type[BaseModel]], **kwargs: Any
-    ) -> Runnable:
+        self, schema: dict[str, Any] | type[BaseModel], **kwargs: Any
+    ) -> Runnable[LanguageModelInput, dict[str, Any] | BaseModel]:
         return RunnableLambda(partial(_fake_runnable, schema=schema, **kwargs))
 
     @property
@@ -77,10 +78,11 @@ def test_structured_prompt_dict() -> None:
 
     assert chain.invoke({"hello": "there"}) == {"name": 1, "value": 42}  # type: ignore[comparison-overlap]
 
-    assert loads(dumps(prompt)).model_dump() == prompt.model_dump()
+    assert (
+        loads(dumps(prompt), allowed_objects="core").model_dump() == prompt.model_dump()
+    )
 
-    chain = loads(dumps(prompt)) | model
-
+    chain = loads(dumps(prompt), allowed_objects="core") | model
     assert chain.invoke({"hello": "there"}) == {"name": 1, "value": 42}
 
 
@@ -102,8 +104,10 @@ def test_structured_prompt_kwargs() -> None:
     model = FakeStructuredChatModel(responses=[])
     chain = prompt | model
     assert chain.invoke({"hello": "there"}) == {"name": 1, "value": 7}  # type: ignore[comparison-overlap]
-    assert loads(dumps(prompt)).model_dump() == prompt.model_dump()
-    chain = loads(dumps(prompt)) | model
+    assert (
+        loads(dumps(prompt), allowed_objects="core").model_dump() == prompt.model_dump()
+    )
+    chain = loads(dumps(prompt), allowed_objects="core") | model
     assert chain.invoke({"hello": "there"}) == {"name": 1, "value": 7}
 
     class OutputSchema(BaseModel):
@@ -123,7 +127,9 @@ def test_structured_prompt_kwargs() -> None:
 
 def test_structured_prompt_template_format() -> None:
     prompt = StructuredPrompt(
-        [("human", "hi {{person.name}}")], schema={}, template_format="mustache"
+        [("human", "hi {{person.name}}")],
+        schema={"type": "object", "properties": {}, "title": "foo"},
+        template_format="mustache",
     )
     assert prompt.messages[0].prompt.template_format == "mustache"  # type: ignore[union-attr, union-attr]
     assert prompt.input_variables == ["person"]
@@ -134,4 +140,41 @@ def test_structured_prompt_template_format() -> None:
 
 def test_structured_prompt_template_empty_vars() -> None:
     with pytest.raises(ChevronError, match="empty tag"):
-        StructuredPrompt([("human", "hi {{}}")], schema={}, template_format="mustache")
+        StructuredPrompt(
+            [("human", "hi {{}}")],
+            schema={"type": "object", "properties": {}, "title": "foo"},
+            template_format="mustache",
+        )
+
+
+def test_structured_prompt_does_not_mutate_caller_kwargs() -> None:
+    """StructuredPrompt must not mutate caller-provided kwargs.
+
+    Merging extra structured-output kwargs into a caller-owned dict would leak
+    options into later prompts that reuse the same dict.
+    """
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+    }
+    shared_options = {"method": "json_schema"}
+
+    first = StructuredPrompt(
+        [("human", "one")],
+        schema,
+        structured_output_kwargs=shared_options,
+        strict=True,
+    )
+    assert first.structured_output_kwargs == {
+        "method": "json_schema",
+        "strict": True,
+    }
+    assert shared_options == {"method": "json_schema"}
+
+    second = StructuredPrompt(
+        [("human", "two")],
+        schema,
+        structured_output_kwargs=shared_options,
+    )
+    assert second.structured_output_kwargs == {"method": "json_schema"}
+    assert shared_options == {"method": "json_schema"}

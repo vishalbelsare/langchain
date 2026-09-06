@@ -8,10 +8,10 @@ from langchain_core.runnables import RunnableConfig
 from langchain_tests.integration_tests import ChatModelIntegrationTests
 from pydantic import BaseModel
 
-from langchain.chat_models import init_chat_model
+from langchain_classic.chat_models import init_chat_model
 
 
-class multiply(BaseModel):
+class Multiply(BaseModel):
     """Product of two ints."""
 
     x: int
@@ -20,12 +20,14 @@ class multiply(BaseModel):
 
 @pytest.mark.requires("langchain_openai", "langchain_anthropic")
 async def test_init_chat_model_chain() -> None:
-    model = init_chat_model("gpt-4o", configurable_fields="any", config_prefix="bar")
-    model_with_tools = model.bind_tools([multiply])
+    model = init_chat_model(
+        "gpt-4.1-mini", configurable_fields="any", config_prefix="bar"
+    )
+    model_with_tools = model.bind_tools([Multiply])
 
     model_with_config = model_with_tools.with_config(
         RunnableConfig(tags=["foo"]),
-        configurable={"bar_model": "claude-3-7-sonnet-20250219"},
+        configurable={"bar_model": "claude-sonnet-4-5-20250929"},
     )
     prompt = ChatPromptTemplate.from_messages([("system", "foo"), ("human", "{input}")])
     chain = prompt | model_with_config
@@ -44,7 +46,7 @@ class TestStandard(ChatModelIntegrationTests):
 
     @property
     def chat_model_params(self) -> dict:
-        return {"model": "gpt-4o", "configurable_fields": "any"}
+        return {"model": "gpt-4.1-mini", "configurable_fields": "any"}
 
     @property
     def supports_image_inputs(self) -> bool:

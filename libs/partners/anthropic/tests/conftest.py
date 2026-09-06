@@ -1,14 +1,17 @@
 from typing import Any
 
 import pytest
-from langchain_tests.conftest import CustomPersister, CustomSerializer
-from langchain_tests.conftest import _base_vcr_config as _base_vcr_config
+from langchain_tests.conftest import CustomPersister, CustomSerializer, base_vcr_config
 from vcr import VCR  # type: ignore[import-untyped]
 
 
 def remove_request_headers(request: Any) -> Any:
     for k in request.headers:
         request.headers[k] = "**REDACTED**"
+    # Redact the URI so cassettes stay host-agnostic (e.g. direct API vs. the
+    # LangSmith gateway). Matching drops the `uri` matcher below, so this only
+    # affects what newly recorded cassettes persist.
+    request.uri = "**REDACTED**"
     return request
 
 
@@ -19,13 +22,20 @@ def remove_response_headers(response: dict) -> dict:
 
 
 @pytest.fixture(scope="session")
-def vcr_config(_base_vcr_config: dict) -> dict:  # noqa: F811
+def vcr_config() -> dict:
     """Extend the default configuration coming from langchain_tests."""
-    config = _base_vcr_config.copy()
+    config = base_vcr_config()
+    # Match on method + body only. Dropping `uri` keeps cassettes host-agnostic
+    # so they replay whether requests go to the API directly or via the gateway.
+    config["match_on"] = [m for m in config.get("match_on", []) if m != "uri"]
     config["before_record_request"] = remove_request_headers
     config["before_record_response"] = remove_response_headers
     config["serializer"] = "yaml.gz"
     config["path_transformer"] = VCR.ensure_suffix(".yaml.gz")
+    config["ignore_hosts"] = [
+        *config.get("ignore_hosts", []),
+        "api.smith.langchain.com",
+    ]
 
     return config
 
